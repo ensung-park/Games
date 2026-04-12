@@ -144,7 +144,7 @@ const SPECIAL = { NONE: 0, STRIPED_H: 1, STRIPED_V: 2, WRAPPED: 3, COLOR_BOMB: 4
 const BLOCKER = { NONE: 0, ICE1: 1, ICE2: 2, CHOCOLATE: 3, STONE: 4 };
 const SHAPES = ['circle', 'diamond', 'square', 'triangle', 'pentagon', 'heart'];
 const SCREEN = { TITLE: -1, LEVEL_SELECT: 0, GOAL_PREVIEW: 5, PLAYING: 1, LEVEL_COMPLETE: 2, LEVEL_FAILED: 3, LEADERBOARD: 4 };
-const GOAL = { SCORE: 0, CLEAR_JELLY: 1, COLLECT: 2, DROP_INGREDIENT: 3 };
+const GOAL = { SCORE: 0, CLEAR_JELLY: 1, COLLECT: 2, CLEAR_CHOCOLATE: 3 };
 
 // Combo celebration messages
 const COMBO_MSGS = [
@@ -210,7 +210,6 @@ const state = {
   hammerAvailable: true,
   hammerActive: false,
   jellyBoard: null,    // [r][c] = 0 (none), 1 (jelly), 2 (double jelly)
-  ingredients: [],     // [{r, c}] positions of ingredient candies
   goalPreviewTimer: 0,
   screenFlash: 0,
 };
@@ -794,7 +793,12 @@ async function processMatches() {
       if (state.goalType === GOAL.COLLECT && state.board[r][c].type === state.goalProgress.collectType) {
         state.goalProgress.collected = (state.goalProgress.collected || 0) + 1;
       }
-      clearIceAt(r, c);
+      // ICE2 requires 2 matches: first match reduces to ICE1, candy stays
+      const hadIce = clearIceAt(r, c);
+      if (hadIce && state.board[r][c].blocker !== BLOCKER.NONE) {
+        // Cell still has ice — don't destroy the candy, just cleared one layer
+        continue;
+      }
       if (state.board[r][c].blocker !== BLOCKER.STONE) state.board[r][c] = makeCell(EMPTY);
     }
     for (const s of specials) { state.board[s.r][s.c] = makeCell(s.type, s.special); state.board[s.r][s.c].scale = 0; sfxSpecialCreate(); addParticle(cellToScreen(s.r, s.c).x, cellToScreen(s.r, s.c).y, '#fff', 8); }
@@ -913,7 +917,11 @@ function isGoalMet() {
   const ld = state.levelData;
   if (ld.goal === GOAL.CLEAR_JELLY) return state.goalProgress.jellyLeft <= 0;
   if (ld.goal === GOAL.COLLECT) return (state.goalProgress.collected || 0) >= state.goalProgress.target;
-  if (ld.goal === GOAL.DROP_INGREDIENT) return (state.goalProgress.dropped || 0) >= state.goalProgress.target;
+  if (ld.goal === GOAL.CLEAR_CHOCOLATE) {
+    // Check if any chocolate remains on the board
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) return false;
+    return true;
+  }
   return state.score >= ld.stars[0]; // SCORE goal
 }
 
@@ -968,11 +976,10 @@ function generateLevels() {
       goal = GOAL.CLEAR_JELLY;
       const jellyCount = 10 + Math.floor(i * 0.8);
       goalData = { jellyCount: Math.min(jellyCount, 30) };
-    } else if (i >= 12 && i % 4 === 1) {
-      // Drop ingredient levels
-      goal = GOAL.DROP_INGREDIENT;
-      goalData = { ingredientCount: 1 + Math.floor((i - 10) * 0.3) };
-      goalData.ingredientCount = Math.min(goalData.ingredientCount, 4);
+    } else if (i >= 14 && i % 4 === 1) {
+      // Clear chocolate levels (only on levels that have chocolate)
+      goal = GOAL.CLEAR_CHOCOLATE;
+      goalData = {};
     }
 
     levels.push({ level: i, moves: m, stars, blockers: bl, goal, goalData });
@@ -1024,9 +1031,9 @@ function handleBoardClick(px, py) {
       state.hammerAvailable = false;
       state.hammerActive = false;
       state.shakeAmount = 5; state.shakeTime = 0;
+      state.animating = true; // Set before async to prevent race
       // Gravity after hammer
       (async () => {
-        state.animating = true;
         await sleep(100);
         const { newTiles, fallingCells } = gravity();
         await animateGravity(fallingCells);
@@ -1323,8 +1330,10 @@ function drawGoalProgress() {
     const gp = state.goalProgress;
     ctx.fillStyle = COLORS[gp.collectType % CANDY_TYPES].main;
     ctx.fillText(`Collected: ${gp.collected || 0} / ${gp.target}`, W / 2, y);
-  } else if (ld.goal === GOAL.DROP_INGREDIENT) {
-    ctx.fillStyle = '#2ed573'; ctx.fillText(`Ingredients: ${state.goalProgress.dropped || 0} / ${state.goalProgress.target}`, W / 2, y);
+  } else if (ld.goal === GOAL.CLEAR_CHOCOLATE) {
+    let chocLeft = 0;
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) chocLeft++;
+    ctx.fillStyle = '#7b4a2b'; ctx.fillText(`Chocolate left: ${chocLeft}`, W / 2, y);
   }
 }
 
@@ -1418,7 +1427,7 @@ function startLevel(n) {
     goalType: ld.goal || GOAL.SCORE,
     goalProgress: {},
     hammerAvailable: true, hammerActive: false,
-    jellyBoard: null, ingredients: [],
+    jellyBoard: null,
     goalPreviewTimer: 3.0,
     screen: SCREEN.GOAL_PREVIEW,
   });
@@ -1442,17 +1451,22 @@ function startLevel(n) {
     state.goalProgress = { jellyLeft: placed };
   } else if (ld.goal === GOAL.COLLECT) {
     state.goalProgress = { collected: 0, target: ld.goalData.collectTarget, collectType: ld.goalData.collectType };
-  } else if (ld.goal === GOAL.DROP_INGREDIENT) {
-    state.ingredients = [];
-    const count = ld.goalData.ingredientCount || 1;
-    for (let i = 0; i < count; i++) {
-      const c = 1 + Math.floor(Math.random() * (COLS - 2));
-      state.board[0][c] = makeCell(EMPTY);
-      state.board[0][c].isIngredient = true;
-      state.board[0][c].type = Math.floor(Math.random() * CANDY_TYPES);
-      state.ingredients.push({ r: 0, c });
+  } else if (ld.goal === GOAL.CLEAR_CHOCOLATE) {
+    // Count chocolate blocks on the board
+    let chocCount = 0;
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) chocCount++;
     }
-    state.goalProgress = { dropped: 0, target: count };
+    // If level has no chocolate, add some
+    if (chocCount === 0) {
+      const toAdd = 3 + Math.floor(state.level * 0.3);
+      const bl = ld.blockers;
+      placeRandomBlockers(bl, BLOCKER.CHOCOLATE, toAdd);
+      createBoard(ld);
+      let att2 = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att2 < 150) { createBoard(ld); att2++; }
+      chocCount = toAdd;
+    }
+    state.goalProgress = { chocolateLeft: chocCount };
   }
 }
 
@@ -1460,7 +1474,7 @@ function getGoalText(ld) {
   if (!ld) return '';
   if (ld.goal === GOAL.CLEAR_JELLY) return 'Clear all the jelly!';
   if (ld.goal === GOAL.COLLECT) return `Collect ${ld.goalData.collectTarget} ${SHAPES[ld.goalData.collectType]} candies!`;
-  if (ld.goal === GOAL.DROP_INGREDIENT) return `Drop ${ld.goalData.ingredientCount} ingredient${ld.goalData.ingredientCount > 1 ? 's' : ''} to the bottom!`;
+  if (ld.goal === GOAL.CLEAR_CHOCOLATE) return 'Clear all the chocolate!';
   return `Score ${ld.stars[0].toLocaleString()} points!`;
 }
 
@@ -1486,9 +1500,9 @@ function gameLoop(time) {
   else if (state.screen === SCREEN.LEADERBOARD) drawLeaderboard();
   else if (state.screen === SCREEN.GOAL_PREVIEW) drawGoalPreview();
   else {
-    drawBoard(); drawHUD(); drawParticles(); drawFloatingTexts();
-    // Draw jelly under board
+    // Draw jelly UNDER the board
     if (state.jellyBoard) drawJelly();
+    drawBoard(); drawHUD(); drawParticles(); drawFloatingTexts();
     // Draw hammer button
     drawHammerButton();
     // Draw goal progress
