@@ -300,14 +300,87 @@ function playNoise(dur, vol, delay) {
   } catch (e) {}
 }
 
-function sfxMatch(n) { const f = 400 + n * 80; playTone(f, 0.15, 'sine', 0.12); playTone(f * 1.25, 0.12, 'sine', 0.08, 0.05); }
-function sfxSpecialCreate() { playTone(500, 0.1, 'sine', 0.1); playTone(700, 0.1, 'sine', 0.1, 0.08); playTone(900, 0.15, 'sine', 0.1, 0.16); }
-function sfxExplosion() { playNoise(0.25, 0.12); playTone(120, 0.3, 'sine', 0.1); }
-function sfxSwap() { playTone(300, 0.08, 'sine', 0.08); playTone(400, 0.08, 'sine', 0.08, 0.04); }
-function sfxBadSwap() { playTone(200, 0.12, 'square', 0.06); playTone(150, 0.15, 'square', 0.06, 0.1); }
-function sfxWin() { [523, 659, 784, 1047].forEach((f, i) => playTone(f, 0.3, 'sine', 0.1, i * 0.12)); }
-function sfxLose() { [400, 350, 300, 250].forEach((f, i) => playTone(f, 0.3, 'sine', 0.08, i * 0.15)); }
-function sfxClick() { playTone(600, 0.05, 'sine', 0.06); }
+// Rich match sound: major chord that rises with cascade level
+function sfxMatch(n) {
+  const base = 350 + n * 100;
+  playTone(base, 0.2, 'sine', 0.1);
+  playTone(base * 1.25, 0.18, 'sine', 0.07, 0.03);   // major 3rd
+  playTone(base * 1.5, 0.15, 'sine', 0.05, 0.06);     // 5th
+  playTone(base * 2, 0.1, 'sine', 0.03, 0.08);         // octave shimmer
+  // Add a soft "pop" noise layer
+  playNoise(0.06, 0.04, 0.01);
+}
+
+// Special candy creation: magical ascending arpeggio with sparkle
+function sfxSpecialCreate() {
+  const notes = [523, 659, 784, 1047]; // C5, E5, G5, C6
+  notes.forEach((f, i) => {
+    playTone(f, 0.15, 'sine', 0.08, i * 0.06);
+    playTone(f * 1.005, 0.15, 'sine', 0.04, i * 0.06); // slight detune for shimmer
+  });
+  playNoise(0.08, 0.03, 0.24); // sparkle tail
+}
+
+// Explosion: deep bass + noise burst + metallic ring
+function sfxExplosion() {
+  playNoise(0.3, 0.15);
+  playTone(80, 0.4, 'sine', 0.12);
+  playTone(160, 0.2, 'triangle', 0.06, 0.02);
+  playTone(40, 0.3, 'sine', 0.08, 0.01); // sub bass
+  playNoise(0.15, 0.06, 0.1); // secondary crack
+}
+
+// Swap: satisfying whoosh with two-tone slide
+function sfxSwap() {
+  playTone(280, 0.1, 'sine', 0.07);
+  playTone(420, 0.1, 'sine', 0.07, 0.03);
+  playTone(350, 0.06, 'triangle', 0.04, 0.01); // body
+  playNoise(0.04, 0.02); // whoosh
+}
+
+// Bad swap: dissonant buzz
+function sfxBadSwap() {
+  playTone(200, 0.15, 'square', 0.05);
+  playTone(190, 0.15, 'square', 0.05, 0.02); // beating frequency
+  playTone(140, 0.2, 'sawtooth', 0.03, 0.08);
+}
+
+// Win: triumphant fanfare with harmonics
+function sfxWin() {
+  const fanfare = [523, 659, 784, 880, 1047]; // C E G A C
+  fanfare.forEach((f, i) => {
+    playTone(f, 0.4, 'sine', 0.09, i * 0.1);
+    playTone(f * 1.5, 0.3, 'sine', 0.04, i * 0.1 + 0.02); // 5th harmony
+  });
+  playTone(1047, 0.6, 'sine', 0.07, 0.5); // sustained final note
+  playTone(1047 * 1.25, 0.5, 'sine', 0.04, 0.52);
+  playNoise(0.1, 0.03, 0.5); // cymbal crash
+}
+
+// Lose: sad descending minor chord
+function sfxLose() {
+  const notes = [440, 392, 349, 330, 262]; // A G F E C
+  notes.forEach((f, i) => {
+    playTone(f, 0.35, 'sine', 0.07, i * 0.18);
+    playTone(f * 0.75, 0.3, 'sine', 0.03, i * 0.18); // minor harmony
+  });
+}
+
+// Click: crisp pop
+function sfxClick() {
+  playTone(800, 0.04, 'sine', 0.06);
+  playTone(1200, 0.03, 'sine', 0.03, 0.01);
+  playNoise(0.02, 0.02);
+}
+
+// Combo celebration sound: escalating chimes
+function sfxCombo(level) {
+  const base = 600 + level * 150;
+  for (let i = 0; i < Math.min(level, 5); i++) {
+    playTone(base + i * 200, 0.12, 'sine', 0.06, i * 0.04);
+    playTone((base + i * 200) * 1.5, 0.1, 'sine', 0.03, i * 0.04 + 0.02);
+  }
+}
 
 // ═══════════════════════════════════════════════════════
 // SECTION 4: TWEEN & PARTICLE SYSTEM
@@ -756,6 +829,7 @@ async function processMatches() {
       let msg = cascade + 'x COMBO!', msgColor = '#ff6bca';
       for (const cm of COMBO_MSGS) { if (cascade >= cm.min) { msg = cm.text; msgColor = cm.color; } }
       addFloatingText(W / 2, boardY - 30, msg, msgColor, Math.floor(cellSize * (0.5 + cascade * 0.08)));
+      sfxCombo(cascade);
       // Screen flash for big combos
       if (cascade >= 4) { state.screenFlash = 0.3; }
     }
@@ -1123,7 +1197,8 @@ function handleTitleClick(px, py) {
 }
 
 // Touch offset: fingers hit ~20px below where users aim
-const TOUCH_OFFSET_Y = ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? -18 : 0;
+// On mobile, finger pad contacts below where users visually aim — shift detection DOWN
+const TOUCH_OFFSET_Y = ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? 20 : 0;
 
 function onPointerDown(e) {
   e.preventDefault(); const px = e.clientX, py = e.clientY + TOUCH_OFFSET_Y;
