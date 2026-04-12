@@ -1196,12 +1196,14 @@ function handleTitleClick(px, py) {
   if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
 }
 
-// Touch offset: fingers hit ~20px below where users aim
-// On mobile, finger pad contacts below where users visually aim — shift detection DOWN
-const TOUCH_OFFSET_Y = ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? 20 : 0;
+// Convert pointer event to canvas coordinates (handles browser chrome, scrolling, etc.)
+function pointerToCanvas(e) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: (e.clientX - rect.left) * (W / rect.width), y: (e.clientY - rect.top) * (H / rect.height) };
+}
 
 function onPointerDown(e) {
-  e.preventDefault(); const px = e.clientX, py = e.clientY + TOUCH_OFFSET_Y;
+  e.preventDefault(); const { x: px, y: py } = pointerToCanvas(e);
   if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; sfxClick(); return; }
   if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; return; }
   if (state.screen === SCREEN.GOAL_PREVIEW) { state.screen = SCREEN.PLAYING; return; }
@@ -1214,7 +1216,8 @@ function onPointerDown(e) {
 
 function onPointerUp(e) {
   e.preventDefault(); if (pStartX === null) return;
-  if (state.screen === SCREEN.PLAYING) handleSwipe(pStartX, pStartY, e.clientX, e.clientY + TOUCH_OFFSET_Y);
+  const { x: ex, y: ey } = pointerToCanvas(e);
+  if (state.screen === SCREEN.PLAYING) handleSwipe(pStartX, pStartY, ex, ey);
   pStartX = pStartY = null;
 }
 
