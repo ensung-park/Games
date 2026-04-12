@@ -90,7 +90,6 @@ const state = {
   hintMove: null,
   particles: [],
   floatingTexts: [],
-  animations: [],
   shakeAmount: 0,
   shakeTime: 0,
   levelData: null,
@@ -212,8 +211,15 @@ function sfxClick() {
 // SECTION 4: ANIMATION & PARTICLE SYSTEM
 // ═══════════════════════════════════════════════════════
 
+const MAX_PARTICLES = 400;
+
 function addParticle(x, y, color, count) {
-  for (let i = 0; i < (count || 8); i++) {
+  const n = count || 8;
+  // Cap total particles to prevent frame drops
+  while (state.particles.length + n > MAX_PARTICLES && state.particles.length > 0) {
+    state.particles.shift();
+  }
+  for (let i = 0; i < n; i++) {
     const angle = Math.random() * Math.PI * 2;
     const speed = 50 + Math.random() * 150;
     state.particles.push({
@@ -834,7 +840,7 @@ function detectSpecials(groups) {
           specialAt.add(key);
           specials.push({
             r: cell.r, c: cell.c,
-            special: g.dir === 'h' ? SPECIAL.STRIPED_V : SPECIAL.STRIPED_H,
+            special: g.dir === 'h' ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V,
             type: state.board[cell.r][cell.c].type,
           });
           placed = true;
@@ -954,15 +960,31 @@ function handleSpecialCombo(r1, c1, r2, c2) {
     return toRemove;
   }
 
-  // Color bomb + normal
+  // Color bomb + normal: all of that color become striped then detonate
   if (s1 === SPECIAL.COLOR_BOMB) {
-    const cells = getColorBombRemoval(r1, c1, state.board[r2][c2].type);
-    for (const c of cells) toRemove.add(c);
+    const targetType = state.board[r2][c2].type;
+    toRemove.add(r1 + ',' + c1);
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        if (state.board[r][c].type === targetType) {
+          state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V;
+          const extra = getSpecialRemoval(r, c, state.board[r][c].special);
+          for (const e of extra) toRemove.add(e);
+          toRemove.add(r + ',' + c);
+        }
     return toRemove;
   }
   if (s2 === SPECIAL.COLOR_BOMB) {
-    const cells = getColorBombRemoval(r2, c2, state.board[r1][c1].type);
-    for (const c of cells) toRemove.add(c);
+    const targetType = state.board[r1][c1].type;
+    toRemove.add(r2 + ',' + c2);
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        if (state.board[r][c].type === targetType) {
+          state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V;
+          const extra = getSpecialRemoval(r, c, state.board[r][c].special);
+          for (const e of extra) toRemove.add(e);
+          toRemove.add(r + ',' + c);
+        }
     return toRemove;
   }
 
@@ -1158,9 +1180,14 @@ async function processMatches() {
     for (const g of groups) {
       if (g.cells.length === 3) pts += 30;
       else if (g.cells.length === 4) pts += 60;
-      else pts += 50 * g.cells.length;
+      else if (g.cells.length >= 5) pts += 100;
     }
-    pts += specials.length * 50;
+    // L/T shapes (wrapped specials from intersections) get bonus
+    for (const s of specials) {
+      if (s.special === SPECIAL.WRAPPED) pts += 80;
+      else if (s.special === SPECIAL.COLOR_BOMB) pts += 100;
+      else pts += 50; // striped
+    }
     const multiplier = cascade > 1 ? cascade : 1;
     state.score += pts * multiplier;
 
@@ -1293,11 +1320,12 @@ async function endOfLevelBonus() {
         state.board[rr][cc] = makeCell(EMPTY);
       }
     }
-    state.score += removed.size * 20;
+    const bonusPts = 50 + removed.size * 10;
+    state.score += bonusPts;
     state.movesLeft--;
 
     const pos = cellToScreen(target.r, target.c);
-    addFloatingText(pos.x, pos.y, '+' + (removed.size * 20), '#ffb347');
+    addFloatingText(pos.x, pos.y, '+' + bonusPts, '#ffb347');
 
     await sleep(180);
     gravity();
@@ -1376,11 +1404,22 @@ function hasValidMoves() {
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       if (!isPlayable(r, c)) continue;
-      // Color bombs can always be swapped
-      if (state.board[r][c].special === SPECIAL.COLOR_BOMB) {
+      const s = state.board[r][c].special;
+      // Color bombs can always be swapped with any adjacent candy
+      if (s === SPECIAL.COLOR_BOMB) {
         for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
           const nr = r + dr, nc = c + dc;
           if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && isPlayable(nr, nc)) {
+            return { r, c, r2: nr, c2: nc };
+          }
+        }
+      }
+      // Any two adjacent specials form a valid combo
+      if (s !== SPECIAL.NONE) {
+        for (const [dr, dc] of [[0, 1], [1, 0]]) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && isPlayable(nr, nc) &&
+              state.board[nr][nc].special !== SPECIAL.NONE) {
             return { r, c, r2: nr, c2: nc };
           }
         }
@@ -1551,7 +1590,8 @@ function getClickedCell(px, py) {
 }
 
 function isSoundToggle(px, py) {
-  return px > W - 55 && py < 45;
+  const hitSize = Math.max(55, cellSize);
+  return px > W - hitSize && py < hitSize * 0.8;
 }
 
 function isBackButton(px, py) {
