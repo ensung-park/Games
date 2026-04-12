@@ -18,16 +18,134 @@ body {
   user-select: none;
   touch-action: none;
 }
-canvas {
-  display: block;
-  image-rendering: auto;
-}
+canvas { display: block; }
 </style>
 </head>
 <body>
 <canvas id="gc"></canvas>
-<script>
-'use strict';
+
+<!-- Firebase SDK (v12 modular, loaded as ES modules) -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-app.js";
+import { getAuth, signInWithPopup, signOut, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, orderBy, limit, getDocs } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAkqGgRL4YLXV4Zv1XMb-2ogMMRzqQm314",
+  authDomain: "candy-crush-game-1f770.firebaseapp.com",
+  projectId: "candy-crush-game-1f770",
+  storageBucket: "candy-crush-game-1f770.firebasestorage.app",
+  messagingSenderId: "118129073252",
+  appId: "1:118129073252:web:75e33d2932111f75b71371",
+  measurementId: "G-PTSTGSHLKX"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = getFirestore(fbApp);
+const googleProvider = new GoogleAuthProvider();
+
+// ═══════════════════════════════════════════════════════
+// FIREBASE INTERFACE (exposed to game)
+// ═══════════════════════════════════════════════════════
+
+const firebase = {
+  user: null,
+  ready: false,
+
+  async signIn() {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (e) {
+      console.warn('Sign-in failed:', e.message);
+    }
+  },
+
+  async signOutUser() {
+    try {
+      await signOut(auth);
+      this.user = null;
+    } catch (e) {
+      console.warn('Sign-out failed:', e.message);
+    }
+  },
+
+  async loadCloudProgress() {
+    if (!this.user) return null;
+    try {
+      const snap = await getDoc(doc(db, 'users', this.user.uid));
+      if (snap.exists()) return snap.data().progress || {};
+      return {};
+    } catch (e) {
+      console.warn('Load failed:', e.message);
+      return null;
+    }
+  },
+
+  async saveCloudProgress(progress, totalStars, highestLevel) {
+    if (!this.user) return;
+    try {
+      const userRef = doc(db, 'users', this.user.uid);
+      const data = {
+        displayName: this.user.displayName || 'Player',
+        photoURL: this.user.photoURL || '',
+        progress: progress,
+        totalStars: totalStars,
+        highestLevel: highestLevel,
+        lastPlayed: new Date().toISOString(),
+      };
+      const snap = await getDoc(userRef);
+      if (snap.exists()) {
+        await updateDoc(userRef, data);
+      } else {
+        data.createdAt = new Date().toISOString();
+        await setDoc(userRef, data);
+      }
+      // Update leaderboard
+      const lbRef = doc(db, 'leaderboard', this.user.uid);
+      await setDoc(lbRef, {
+        uid: this.user.uid,
+        displayName: this.user.displayName || 'Player',
+        photoURL: this.user.photoURL || '',
+        totalStars: totalStars,
+        highestLevel: highestLevel,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.warn('Save failed:', e.message);
+    }
+  },
+
+  async loadLeaderboard() {
+    try {
+      const q = query(collection(db, 'leaderboard'), orderBy('totalStars', 'desc'), limit(20));
+      const snap = await getDocs(q);
+      return snap.docs.map(d => d.data());
+    } catch (e) {
+      console.warn('Leaderboard load failed:', e.message);
+      return [];
+    }
+  }
+};
+
+// Auth state listener
+onAuthStateChanged(auth, async (user) => {
+  firebase.user = user;
+  firebase.ready = true;
+  if (user && state.screen === SCREEN.TITLE) {
+    // Merge local progress with cloud
+    const cloud = await firebase.loadCloudProgress();
+    if (cloud) {
+      for (const key in cloud) {
+        const cloudStars = cloud[key] || 0;
+        const localStars = state.progress[key] || 0;
+        state.progress[key] = Math.max(cloudStars, localStars);
+      }
+      saveProgressLocal();
+    }
+    state.screen = SCREEN.LEVEL_SELECT;
+  }
+});
 
 // ═══════════════════════════════════════════════════════
 // SECTION 1: CONSTANTS & CONFIGURATION
@@ -48,7 +166,7 @@ const COLORS = [
 const SPECIAL = { NONE: 0, STRIPED_H: 1, STRIPED_V: 2, WRAPPED: 3, COLOR_BOMB: 4 };
 const BLOCKER = { NONE: 0, ICE1: 1, ICE2: 2, CHOCOLATE: 3, STONE: 4 };
 const SHAPES = ['circle', 'diamond', 'square', 'triangle', 'pentagon', 'heart'];
-const SCREEN = { LEVEL_SELECT: 0, PLAYING: 1, LEVEL_COMPLETE: 2, LEVEL_FAILED: 3 };
+const SCREEN = { TITLE: -1, LEVEL_SELECT: 0, PLAYING: 1, LEVEL_COMPLETE: 2, LEVEL_FAILED: 3, LEADERBOARD: 4 };
 
 const canvas = document.getElementById('gc');
 const ctx = canvas.getContext('2d');
@@ -77,7 +195,7 @@ resize();
 // ═══════════════════════════════════════════════════════
 
 const state = {
-  screen: SCREEN.LEVEL_SELECT,
+  screen: SCREEN.TITLE,
   board: [],
   score: 0,
   movesLeft: 0,
@@ -90,35 +208,56 @@ const state = {
   hintMove: null,
   particles: [],
   floatingTexts: [],
+  tweens: [],
   shakeAmount: 0,
   shakeTime: 0,
   levelData: null,
   stars: 0,
   progress: {},
   bonusPhase: false,
+  leaderboard: [],
+  leaderboardLoading: false,
 };
 
 function makeCell(type, special, blocker) {
-  return { type: type, special: special || SPECIAL.NONE, blocker: blocker || BLOCKER.NONE };
+  return { type, special: special || SPECIAL.NONE, blocker: blocker || BLOCKER.NONE };
 }
 
-function loadProgress() {
+function loadProgressLocal() {
   try {
     const saved = localStorage.getItem('sweetMatchProgress');
     if (saved) state.progress = JSON.parse(saved);
-  } catch(e) {}
+  } catch (e) {}
 }
 
-function saveProgress() {
+function saveProgressLocal() {
   try {
     localStorage.setItem('sweetMatchProgress', JSON.stringify(state.progress));
-  } catch(e) {}
+  } catch (e) {}
 }
 
-loadProgress();
+function getProgressStats() {
+  let totalStars = 0, highestLevel = 0;
+  for (const key in state.progress) {
+    totalStars += state.progress[key] || 0;
+    const lvl = parseInt(key);
+    if (lvl > highestLevel && state.progress[key] > 0) highestLevel = lvl;
+  }
+  return { totalStars, highestLevel };
+}
+
+async function saveProgress() {
+  saveProgressLocal();
+  if (firebase.user) {
+    const { totalStars, highestLevel } = getProgressStats();
+    await firebase.saveCloudProgress(state.progress, totalStars, highestLevel);
+  }
+}
+
+loadProgressLocal();
 
 // ═══════════════════════════════════════════════════════
-// SECTION 3: AUDIO ENGINE (Web Audio API)
+// SECTION 3: AUDIO ENGINE
 // ═══════════════════════════════════════════════════════
 
 let audioCtx = null;
@@ -126,7 +265,7 @@ let soundEnabled = true;
 
 function ensureAudio() {
   if (!audioCtx) {
-    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
   }
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 }
@@ -145,141 +284,102 @@ function playTone(freq, duration, type, vol, delay) {
     gain.connect(audioCtx.destination);
     osc.start(t);
     osc.stop(t + duration);
-  } catch(e) {}
+  } catch (e) {}
 }
 
-function playNoise(duration, vol, delay) {
+function playNoise(dur, vol, delay) {
   if (!soundEnabled || !audioCtx) return;
   try {
     const t = audioCtx.currentTime + (delay || 0);
-    const bufferSize = Math.floor(audioCtx.sampleRate * duration);
-    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const sz = Math.floor(audioCtx.sampleRate * dur);
+    const buf = audioCtx.createBuffer(1, sz, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < sz; i++) d[i] = Math.random() * 2 - 1;
     const src = audioCtx.createBufferSource();
-    src.buffer = buffer;
+    src.buffer = buf;
     const gain = audioCtx.createGain();
     gain.gain.setValueAtTime(vol || 0.1, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
     src.connect(gain);
     gain.connect(audioCtx.destination);
     src.start(t);
-    src.stop(t + duration);
-  } catch(e) {}
+    src.stop(t + dur);
+  } catch (e) {}
 }
 
-function sfxMatch(cascadeLevel) {
-  const baseFreq = 400 + cascadeLevel * 80;
-  playTone(baseFreq, 0.15, 'sine', 0.12);
-  playTone(baseFreq * 1.25, 0.12, 'sine', 0.08, 0.05);
-}
-
-function sfxSpecialCreate() {
-  playTone(500, 0.1, 'sine', 0.1);
-  playTone(700, 0.1, 'sine', 0.1, 0.08);
-  playTone(900, 0.15, 'sine', 0.1, 0.16);
-}
-
-function sfxExplosion() {
-  playNoise(0.25, 0.12);
-  playTone(120, 0.3, 'sine', 0.1);
-}
-
-function sfxSwap() {
-  playTone(300, 0.08, 'sine', 0.08);
-  playTone(400, 0.08, 'sine', 0.08, 0.04);
-}
-
-function sfxBadSwap() {
-  playTone(200, 0.12, 'square', 0.06);
-  playTone(150, 0.15, 'square', 0.06, 0.1);
-}
-
-function sfxWin() {
-  [523, 659, 784, 1047].forEach((f, i) => playTone(f, 0.3, 'sine', 0.1, i * 0.12));
-}
-
-function sfxLose() {
-  [400, 350, 300, 250].forEach((f, i) => playTone(f, 0.3, 'sine', 0.08, i * 0.15));
-}
-
-function sfxClick() {
-  playTone(600, 0.05, 'sine', 0.06);
-}
+function sfxMatch(n) { const f = 400 + n * 80; playTone(f, 0.15, 'sine', 0.12); playTone(f * 1.25, 0.12, 'sine', 0.08, 0.05); }
+function sfxSpecialCreate() { playTone(500, 0.1, 'sine', 0.1); playTone(700, 0.1, 'sine', 0.1, 0.08); playTone(900, 0.15, 'sine', 0.1, 0.16); }
+function sfxExplosion() { playNoise(0.25, 0.12); playTone(120, 0.3, 'sine', 0.1); }
+function sfxSwap() { playTone(300, 0.08, 'sine', 0.08); playTone(400, 0.08, 'sine', 0.08, 0.04); }
+function sfxBadSwap() { playTone(200, 0.12, 'square', 0.06); playTone(150, 0.15, 'square', 0.06, 0.1); }
+function sfxWin() { [523, 659, 784, 1047].forEach((f, i) => playTone(f, 0.3, 'sine', 0.1, i * 0.12)); }
+function sfxLose() { [400, 350, 300, 250].forEach((f, i) => playTone(f, 0.3, 'sine', 0.08, i * 0.15)); }
+function sfxClick() { playTone(600, 0.05, 'sine', 0.06); }
 
 // ═══════════════════════════════════════════════════════
-// SECTION 4: ANIMATION & PARTICLE SYSTEM
+// SECTION 4: TWEEN & PARTICLE SYSTEM
 // ═══════════════════════════════════════════════════════
 
 const MAX_PARTICLES = 400;
 
 function addParticle(x, y, color, count) {
   const n = count || 8;
-  // Cap total particles to prevent frame drops
-  while (state.particles.length + n > MAX_PARTICLES && state.particles.length > 0) {
-    state.particles.shift();
-  }
+  while (state.particles.length + n > MAX_PARTICLES && state.particles.length > 0) state.particles.shift();
   for (let i = 0; i < n; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = 50 + Math.random() * 150;
-    state.particles.push({
-      x, y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: 0.4 + Math.random() * 0.4,
-      maxLife: 0.4 + Math.random() * 0.4,
-      size: 2 + Math.random() * 4,
-      color: color,
-    });
+    const a = Math.random() * Math.PI * 2, sp = 50 + Math.random() * 150;
+    state.particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.4 + Math.random() * 0.4, maxLife: 0.4 + Math.random() * 0.4, size: 2 + Math.random() * 4, color });
   }
 }
 
 function addConfetti(x, y, count) {
   for (let i = 0; i < (count || 30); i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = 100 + Math.random() * 250;
-    state.particles.push({
-      x, y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed - 150,
-      life: 1.0 + Math.random() * 1.0,
-      maxLife: 1.0 + Math.random() * 1.0,
-      size: 3 + Math.random() * 5,
-      color: COLORS[Math.floor(Math.random() * COLORS.length)].main,
-    });
+    const a = Math.random() * Math.PI * 2, sp = 100 + Math.random() * 250;
+    state.particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 150, life: 1 + Math.random(), maxLife: 1 + Math.random(), size: 3 + Math.random() * 5, color: COLORS[Math.floor(Math.random() * COLORS.length)].main });
   }
 }
 
 function addFloatingText(x, y, text, color, size) {
-  state.floatingTexts.push({
-    x, y, text, color: color || '#fff',
-    life: 1.2, maxLife: 1.2,
-    vy: -70,
-    size: size || Math.floor(cellSize * 0.4),
+  state.floatingTexts.push({ x, y, text, color: color || '#fff', life: 1.2, maxLife: 1.2, vy: -70, size: size || Math.floor(cellSize * 0.4) });
+}
+
+// Tween system for smooth animations
+function tween(obj, props, duration, easing) {
+  return new Promise(resolve => {
+    const start = {};
+    for (const k in props) start[k] = obj[k] !== undefined ? obj[k] : 0;
+    state.tweens.push({ obj, start, end: props, duration, elapsed: 0, easing: easing || 'easeOut', onDone: resolve });
   });
+}
+
+function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+function easeIn(t) { return t * t; }
+function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) / 2; }
+function easeBounce(t) { if (t < 0.5) return 4 * t * t; const b = (t - 0.8) * 5; return 1 - b * b * 0.15; }
+
+function updateTweens(dt) {
+  for (let i = state.tweens.length - 1; i >= 0; i--) {
+    const tw = state.tweens[i];
+    tw.elapsed += dt;
+    let t = Math.min(tw.elapsed / tw.duration, 1);
+    const ef = tw.easing === 'easeIn' ? easeIn : tw.easing === 'easeInOut' ? easeInOut : tw.easing === 'bounce' ? easeBounce : easeOut;
+    const et = ef(t);
+    for (const k in tw.end) tw.obj[k] = tw.start[k] + (tw.end[k] - tw.start[k]) * et;
+    if (t >= 1) { state.tweens.splice(i, 1); if (tw.onDone) tw.onDone(); }
+  }
 }
 
 function updateParticles(dt) {
   for (let i = state.particles.length - 1; i >= 0; i--) {
     const p = state.particles[i];
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.vy += 250 * dt;
-    p.life -= dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 250 * dt; p.life -= dt;
     if (p.life <= 0) state.particles.splice(i, 1);
   }
   for (let i = state.floatingTexts.length - 1; i >= 0; i--) {
     const ft = state.floatingTexts[i];
-    ft.y += ft.vy * dt;
-    ft.vy *= 0.97;
-    ft.life -= dt;
+    ft.y += ft.vy * dt; ft.vy *= 0.97; ft.life -= dt;
     if (ft.life <= 0) state.floatingTexts.splice(i, 1);
   }
-  if (state.shakeAmount > 0) {
-    state.shakeTime += dt;
-    state.shakeAmount *= Math.pow(0.05, dt);
-    if (state.shakeAmount < 0.3) state.shakeAmount = 0;
-  }
+  if (state.shakeAmount > 0) { state.shakeTime += dt; state.shakeAmount *= Math.pow(0.05, dt); if (state.shakeAmount < 0.3) state.shakeAmount = 0; }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -287,353 +387,140 @@ function updateParticles(dt) {
 // ═══════════════════════════════════════════════════════
 
 function cellToScreen(r, c) {
-  return {
-    x: boardX + c * cellSize + cellSize / 2,
-    y: boardY + r * cellSize + cellSize / 2,
-  };
+  return { x: boardX + c * cellSize + cellSize / 2, y: boardY + r * cellSize + cellSize / 2 };
 }
 
-function drawRoundedRect(x, y, w, h, radius) {
+function drawRoundedRect(x, y, w, h, rad) {
   ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.lineTo(x + w - radius, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
-  ctx.lineTo(x + w, y + h - radius);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
-  ctx.lineTo(x + radius, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
-  ctx.lineTo(x, y + radius);
-  ctx.quadraticCurveTo(x, y, x + radius, y);
-  ctx.closePath();
+  ctx.moveTo(x + rad, y); ctx.lineTo(x + w - rad, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rad); ctx.lineTo(x + w, y + h - rad);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rad, y + h); ctx.lineTo(x + rad, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rad); ctx.lineTo(x, y + rad);
+  ctx.quadraticCurveTo(x, y, x + rad, y); ctx.closePath();
 }
 
 function drawCandyShape(x, y, r, type) {
   ctx.beginPath();
-  switch(SHAPES[type]) {
-    case 'circle':
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      break;
-    case 'diamond':
-      ctx.moveTo(x, y - r);
-      ctx.lineTo(x + r * 0.85, y);
-      ctx.lineTo(x, y + r);
-      ctx.lineTo(x - r * 0.85, y);
-      ctx.closePath();
-      break;
-    case 'square':
-      drawRoundedRect(x - r * 0.75, y - r * 0.75, r * 1.5, r * 1.5, r * 0.22);
-      break;
-    case 'triangle':
-      ctx.moveTo(x, y - r * 0.95);
-      ctx.lineTo(x + r * 0.9, y + r * 0.65);
-      ctx.lineTo(x - r * 0.9, y + r * 0.65);
-      ctx.closePath();
-      break;
-    case 'pentagon':
-      for (let i = 0; i < 5; i++) {
-        const angle = -Math.PI / 2 + i * Math.PI * 2 / 5;
-        const px = x + Math.cos(angle) * r;
-        const py = y + Math.sin(angle) * r;
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      }
-      ctx.closePath();
-      break;
-    case 'heart':
-      ctx.moveTo(x, y + r * 0.65);
-      ctx.bezierCurveTo(x - r * 1.2, y - r * 0.1, x - r * 0.6, y - r * 0.95, x, y - r * 0.35);
-      ctx.bezierCurveTo(x + r * 0.6, y - r * 0.95, x + r * 1.2, y - r * 0.1, x, y + r * 0.65);
-      break;
+  switch (SHAPES[type]) {
+    case 'circle': ctx.arc(x, y, r, 0, Math.PI * 2); break;
+    case 'diamond': ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.85, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r * 0.85, y); ctx.closePath(); break;
+    case 'square': drawRoundedRect(x - r * 0.75, y - r * 0.75, r * 1.5, r * 1.5, r * 0.22); break;
+    case 'triangle': ctx.moveTo(x, y - r * 0.95); ctx.lineTo(x + r * 0.9, y + r * 0.65); ctx.lineTo(x - r * 0.9, y + r * 0.65); ctx.closePath(); break;
+    case 'pentagon': for (let i = 0; i < 5; i++) { const a = -Math.PI / 2 + i * Math.PI * 2 / 5; if (i === 0) ctx.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); else ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); } ctx.closePath(); break;
+    case 'heart': ctx.moveTo(x, y + r * 0.65); ctx.bezierCurveTo(x - r * 1.2, y - r * 0.1, x - r * 0.6, y - r * 0.95, x, y - r * 0.35); ctx.bezierCurveTo(x + r * 0.6, y - r * 0.95, x + r * 1.2, y - r * 0.1, x, y + r * 0.65); break;
   }
 }
 
 function drawCandy(x, y, size, type, special, alpha) {
   if (type < 0 || type >= CANDY_TYPES) return;
-  const col = COLORS[type];
-  const r = size * 0.40;
-
+  const col = COLORS[type], r = size * 0.40;
   ctx.save();
   if (alpha !== undefined) ctx.globalAlpha = alpha;
-
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath();
-  ctx.arc(x + 1.5, y + 2, r, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Main body
+  ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.beginPath(); ctx.arc(x + 1.5, y + 2, r, 0, Math.PI * 2); ctx.fill();
   const grad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, 0, x, y, r * 1.1);
-  grad.addColorStop(0, col.light);
-  grad.addColorStop(0.5, col.main);
-  grad.addColorStop(1, col.dark);
-  ctx.fillStyle = grad;
-  drawCandyShape(x, y, r, type);
-  ctx.fill();
-
-  // Glossy highlight
-  ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  ctx.beginPath();
-  ctx.ellipse(x - r * 0.15, y - r * 0.28, r * 0.5, r * 0.3, -0.3, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Special indicators
-  if (special === SPECIAL.STRIPED_H) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-    ctx.lineWidth = 1.5;
-    for (let i = -2; i <= 2; i++) {
-      ctx.beginPath();
-      ctx.moveTo(x - r * 0.65, y + i * (r * 0.22));
-      ctx.lineTo(x + r * 0.65, y + i * (r * 0.22));
-      ctx.stroke();
-    }
-  } else if (special === SPECIAL.STRIPED_V) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-    ctx.lineWidth = 1.5;
-    for (let i = -2; i <= 2; i++) {
-      ctx.beginPath();
-      ctx.moveTo(x + i * (r * 0.22), y - r * 0.65);
-      ctx.lineTo(x + i * (r * 0.22), y + r * 0.65);
-      ctx.stroke();
-    }
-  } else if (special === SPECIAL.WRAPPED) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(x, y, r * 0.6, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(x, y, r * 0.32, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
+  grad.addColorStop(0, col.light); grad.addColorStop(0.5, col.main); grad.addColorStop(1, col.dark);
+  ctx.fillStyle = grad; drawCandyShape(x, y, r, type); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.beginPath(); ctx.ellipse(x - r * 0.15, y - r * 0.28, r * 0.5, r * 0.3, -0.3, 0, Math.PI * 2); ctx.fill();
+  if (special === SPECIAL.STRIPED_H) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x - r * 0.65, y + i * r * 0.22); ctx.lineTo(x + r * 0.65, y + i * r * 0.22); ctx.stroke(); } }
+  else if (special === SPECIAL.STRIPED_V) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x + i * r * 0.22, y - r * 0.65); ctx.lineTo(x + i * r * 0.22, y + r * 0.65); ctx.stroke(); } }
+  else if (special === SPECIAL.WRAPPED) { ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r * 0.6, 0, Math.PI * 2); ctx.stroke(); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, r * 0.32, 0, Math.PI * 2); ctx.stroke(); }
   ctx.restore();
 }
 
 function drawColorBomb(x, y, size, alpha) {
   const r = size * 0.40;
-  ctx.save();
-  if (alpha !== undefined) ctx.globalAlpha = alpha;
-
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath();
-  ctx.arc(x + 1.5, y + 2, r, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Rainbow segments
+  ctx.save(); if (alpha !== undefined) ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.beginPath(); ctx.arc(x + 1.5, y + 2, r, 0, Math.PI * 2); ctx.fill();
   const now = performance.now();
-  for (let i = 0; i < 6; i++) {
-    const angle = (i / 6) * Math.PI * 2 + now * 0.002;
-    ctx.fillStyle = COLORS[i].main;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.arc(x, y, r, angle, angle + Math.PI / 3);
-    ctx.closePath();
-    ctx.fill();
-  }
-
-  // White center
-  const centerGrad = ctx.createRadialGradient(x, y, 0, x, y, r * 0.35);
-  centerGrad.addColorStop(0, '#fff');
-  centerGrad.addColorStop(1, 'rgba(255,255,255,0.3)');
-  ctx.fillStyle = centerGrad;
-  ctx.beginPath();
-  ctx.arc(x, y, r * 0.3, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Sparkle
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.beginPath();
-  ctx.ellipse(x - r * 0.12, y - r * 0.2, r * 0.35, r * 0.2, -0.3, 0, Math.PI * 2);
-  ctx.fill();
-
+  for (let i = 0; i < 6; i++) { const a = (i / 6) * Math.PI * 2 + now * 0.002; ctx.fillStyle = COLORS[i].main; ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, r, a, a + Math.PI / 3); ctx.closePath(); ctx.fill(); }
+  const cg = ctx.createRadialGradient(x, y, 0, x, y, r * 0.35); cg.addColorStop(0, '#fff'); cg.addColorStop(1, 'rgba(255,255,255,0.3)');
+  ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, r * 0.3, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
 
 function drawBlocker(x, y, size, blocker) {
   const r = size * 0.44;
   if (blocker === BLOCKER.ICE1 || blocker === BLOCKER.ICE2) {
-    const alpha = blocker === BLOCKER.ICE2 ? 0.25 : 0.12;
-    ctx.fillStyle = `rgba(180,230,255,${alpha})`;
-    drawRoundedRect(x - r, y - r, r * 2, r * 2, 6);
-    ctx.fill();
-    ctx.strokeStyle = blocker === BLOCKER.ICE2 ? 'rgba(150,220,255,0.7)' : 'rgba(150,220,255,0.4)';
-    ctx.lineWidth = blocker === BLOCKER.ICE2 ? 2.5 : 1.5;
-    drawRoundedRect(x - r, y - r, r * 2, r * 2, 6);
-    ctx.stroke();
-    // Ice crack detail
-    if (blocker === BLOCKER.ICE1) {
-      ctx.strokeStyle = 'rgba(200,240,255,0.3)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x - r * 0.3, y - r * 0.5);
-      ctx.lineTo(x + r * 0.1, y);
-      ctx.lineTo(x + r * 0.4, y + r * 0.3);
-      ctx.stroke();
-    }
+    ctx.fillStyle = `rgba(180,230,255,${blocker === BLOCKER.ICE2 ? 0.25 : 0.12})`; drawRoundedRect(x - r, y - r, r * 2, r * 2, 6); ctx.fill();
+    ctx.strokeStyle = blocker === BLOCKER.ICE2 ? 'rgba(150,220,255,0.7)' : 'rgba(150,220,255,0.4)'; ctx.lineWidth = blocker === BLOCKER.ICE2 ? 2.5 : 1.5;
+    drawRoundedRect(x - r, y - r, r * 2, r * 2, 6); ctx.stroke();
+    if (blocker === BLOCKER.ICE1) { ctx.strokeStyle = 'rgba(200,240,255,0.3)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x - r * 0.3, y - r * 0.5); ctx.lineTo(x + r * 0.1, y); ctx.lineTo(x + r * 0.4, y + r * 0.3); ctx.stroke(); }
   } else if (blocker === BLOCKER.CHOCOLATE) {
-    const chocGrad = ctx.createRadialGradient(x - r * 0.2, y - r * 0.2, 0, x, y, r * 1.2);
-    chocGrad.addColorStop(0, '#7b4a2b');
-    chocGrad.addColorStop(1, '#3e210e');
-    ctx.fillStyle = chocGrad;
-    drawRoundedRect(x - r, y - r, r * 2, r * 2, 6);
-    ctx.fill();
-    // Chocolate texture
-    ctx.fillStyle = 'rgba(90,50,20,0.5)';
-    const seed = (Math.floor(x) * 31 + Math.floor(y) * 17);
-    for (let i = 0; i < 5; i++) {
-      const cx2 = x - r * 0.5 + ((seed * (i + 1) * 7) % 100) / 100 * r;
-      const cy2 = y - r * 0.5 + ((seed * (i + 1) * 13) % 100) / 100 * r;
-      ctx.beginPath();
-      ctx.arc(cx2, cy2, 1.5 + (i % 3), 0, Math.PI * 2);
-      ctx.fill();
-    }
-    // Shine
-    ctx.fillStyle = 'rgba(255,255,255,0.08)';
-    ctx.beginPath();
-    ctx.ellipse(x - r * 0.2, y - r * 0.3, r * 0.5, r * 0.25, -0.3, 0, Math.PI * 2);
-    ctx.fill();
+    const cg = ctx.createRadialGradient(x - r * 0.2, y - r * 0.2, 0, x, y, r * 1.2); cg.addColorStop(0, '#7b4a2b'); cg.addColorStop(1, '#3e210e');
+    ctx.fillStyle = cg; drawRoundedRect(x - r, y - r, r * 2, r * 2, 6); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.ellipse(x - r * 0.2, y - r * 0.3, r * 0.5, r * 0.25, -0.3, 0, Math.PI * 2); ctx.fill();
   } else if (blocker === BLOCKER.STONE) {
-    const stoneGrad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, 0, x, y, r * 1.3);
-    stoneGrad.addColorStop(0, '#888');
-    stoneGrad.addColorStop(1, '#444');
-    ctx.fillStyle = stoneGrad;
-    drawRoundedRect(x - r, y - r, r * 2, r * 2, 4);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = 1;
-    drawRoundedRect(x - r, y - r, r * 2, r * 2, 4);
-    ctx.stroke();
-    // Crack lines
-    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x - r * 0.5, y - r * 0.3);
-    ctx.lineTo(x + r * 0.15, y + r * 0.05);
-    ctx.lineTo(x + r * 0.5, y + r * 0.45);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x + r * 0.15, y + r * 0.05);
-    ctx.lineTo(x - r * 0.1, y + r * 0.5);
-    ctx.stroke();
+    const sg = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, 0, x, y, r * 1.3); sg.addColorStop(0, '#888'); sg.addColorStop(1, '#444');
+    ctx.fillStyle = sg; drawRoundedRect(x - r, y - r, r * 2, r * 2, 4); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x - r * 0.5, y - r * 0.3); ctx.lineTo(x + r * 0.15, y + r * 0.05); ctx.lineTo(x + r * 0.5, y + r * 0.45); ctx.stroke();
   }
 }
 
 function drawBoard() {
   if (state.screen !== SCREEN.PLAYING && state.screen !== SCREEN.LEVEL_COMPLETE && state.screen !== SCREEN.LEVEL_FAILED) return;
-
   const shk = state.shakeAmount;
   const sx = shk ? Math.sin(state.shakeTime * 40) * shk : 0;
   const sy = shk ? Math.cos(state.shakeTime * 35) * shk * 0.7 : 0;
 
-  // Board background
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  drawRoundedRect(boardX - 10 + sx, boardY - 10 + sy, cellSize * COLS + 20, cellSize * ROWS + 20, 16);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.lineWidth = 1;
-  drawRoundedRect(boardX - 10 + sx, boardY - 10 + sy, cellSize * COLS + 20, cellSize * ROWS + 20, 16);
-  ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.3)'; drawRoundedRect(boardX - 10 + sx, boardY - 10 + sy, cellSize * COLS + 20, cellSize * ROWS + 20, 16); ctx.fill();
 
-  // Grid cells
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
-      const pos = cellToScreen(r, c);
-      const cx = pos.x + sx, cy = pos.y + sy;
-
-      // Cell background
+      const pos = cellToScreen(r, c), cx = pos.x + sx, cy = pos.y + sy;
       ctx.fillStyle = (r + c) % 2 === 0 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.015)';
-      drawRoundedRect(cx - cellSize / 2 + 1, cy - cellSize / 2 + 1, cellSize - 2, cellSize - 2, 5);
-      ctx.fill();
+      drawRoundedRect(cx - cellSize / 2 + 1, cy - cellSize / 2 + 1, cellSize - 2, cellSize - 2, 5); ctx.fill();
 
       const cell = state.board[r] && state.board[r][c];
       if (!cell) continue;
+      if (cell.blocker === BLOCKER.STONE) { drawBlocker(cx, cy, cellSize, BLOCKER.STONE); continue; }
+      if (cell.blocker === BLOCKER.CHOCOLATE) { drawBlocker(cx, cy, cellSize, BLOCKER.CHOCOLATE); continue; }
 
-      // Stone blocks the entire cell
-      if (cell.blocker === BLOCKER.STONE) {
-        drawBlocker(cx, cy, cellSize, BLOCKER.STONE);
-        continue;
-      }
-      // Chocolate blocks the entire cell
-      if (cell.blocker === BLOCKER.CHOCOLATE) {
-        drawBlocker(cx, cy, cellSize, BLOCKER.CHOCOLATE);
-        continue;
-      }
-
-      // Draw candy
       if (cell.type >= 0) {
-        const drawX = cell.drawX !== undefined ? cell.drawX + sx : cx;
-        const drawY = cell.drawY !== undefined ? cell.drawY + sy : cy;
-        const scale = cell.scale !== undefined ? cell.scale : 1;
-        const drawAlpha = cell.alpha !== undefined ? cell.alpha : 1;
-        const drawSize = cellSize * scale;
-
-        if (cell.special === SPECIAL.COLOR_BOMB) {
-          drawColorBomb(drawX, drawY, drawSize, drawAlpha);
-        } else {
-          drawCandy(drawX, drawY, drawSize, cell.type, cell.special, drawAlpha);
-        }
+        const dx = cell.drawX !== undefined ? cell.drawX + sx : cx;
+        const dy = cell.drawY !== undefined ? cell.drawY + sy : cy;
+        const sc = cell.scale !== undefined ? cell.scale : 1;
+        const al = cell.alpha !== undefined ? cell.alpha : 1;
+        if (al <= 0.01) continue;
+        if (cell.special === SPECIAL.COLOR_BOMB) drawColorBomb(dx, dy, cellSize * sc, al);
+        else drawCandy(dx, dy, cellSize * sc, cell.type, cell.special, al);
       }
-
-      // Draw ice overlay on top of candy
-      if (cell.blocker === BLOCKER.ICE1 || cell.blocker === BLOCKER.ICE2) {
-        drawBlocker(cx, cy, cellSize, cell.blocker);
-      }
+      if (cell.blocker === BLOCKER.ICE1 || cell.blocker === BLOCKER.ICE2) drawBlocker(cx, cy, cellSize, cell.blocker);
     }
   }
 
-  // Selected cell highlight
+  // Selection highlight
   if (state.selected && state.screen === SCREEN.PLAYING) {
-    const pos = cellToScreen(state.selected.r, state.selected.c);
+    const p = cellToScreen(state.selected.r, state.selected.c);
     const pulse = 0.7 + 0.3 * Math.sin(performance.now() * 0.008);
-    ctx.strokeStyle = `rgba(255,255,255,${pulse})`;
-    ctx.lineWidth = 2.5;
-    ctx.shadowColor = '#fff';
-    ctx.shadowBlur = 10;
-    drawRoundedRect(pos.x - cellSize / 2 + 3 + sx, pos.y - cellSize / 2 + 3 + sy, cellSize - 6, cellSize - 6, 7);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
+    ctx.strokeStyle = `rgba(255,255,255,${pulse})`; ctx.lineWidth = 2.5; ctx.shadowColor = '#fff'; ctx.shadowBlur = 10;
+    drawRoundedRect(p.x - cellSize / 2 + 3 + sx, p.y - cellSize / 2 + 3 + sy, cellSize - 6, cellSize - 6, 7); ctx.stroke(); ctx.shadowBlur = 0;
   }
 
-  // Hint highlight
+  // Hint
   if (state.hintMove && !state.selected && !state.animating && state.screen === SCREEN.PLAYING) {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
-    ctx.strokeStyle = `rgba(255,255,100,${0.2 + pulse * 0.5})`;
-    ctx.lineWidth = 2;
-    const h1 = cellToScreen(state.hintMove.r, state.hintMove.c);
-    drawRoundedRect(h1.x - cellSize / 2 + 4 + sx, h1.y - cellSize / 2 + 4 + sy, cellSize - 8, cellSize - 8, 7);
-    ctx.stroke();
-    const h2 = cellToScreen(state.hintMove.r2, state.hintMove.c2);
-    drawRoundedRect(h2.x - cellSize / 2 + 4 + sx, h2.y - cellSize / 2 + 4 + sy, cellSize - 8, cellSize - 8, 7);
-    ctx.stroke();
+    ctx.strokeStyle = `rgba(255,255,100,${0.2 + pulse * 0.5})`; ctx.lineWidth = 2;
+    for (const key of ['', '2']) {
+      const h = cellToScreen(state.hintMove[key ? 'r2' : 'r'], state.hintMove[key ? 'c2' : 'c']);
+      drawRoundedRect(h.x - cellSize / 2 + 4 + sx, h.y - cellSize / 2 + 4 + sy, cellSize - 8, cellSize - 8, 7); ctx.stroke();
+    }
   }
 }
 
 function drawParticles() {
   for (const p of state.particles) {
-    const alpha = Math.min(1, p.life / p.maxLife * 2);
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * Math.min(1, p.life / p.maxLife + 0.3), 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = Math.min(1, p.life / p.maxLife * 2); ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size * Math.min(1, p.life / p.maxLife + 0.3), 0, Math.PI * 2); ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
 
 function drawFloatingTexts() {
   for (const ft of state.floatingTexts) {
-    const alpha = Math.min(1, ft.life / ft.maxLife * 2);
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = ft.color;
-    ctx.font = `bold ${ft.size}px 'Segoe UI', system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // Text shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.4)';
-    ctx.fillText(ft.text, ft.x + 1, ft.y + 1);
-    ctx.fillStyle = ft.color;
-    ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.globalAlpha = Math.min(1, ft.life / ft.maxLife * 2);
+    ctx.font = `bold ${ft.size}px 'Segoe UI', system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(ft.text, ft.x + 1, ft.y + 1);
+    ctx.fillStyle = ft.color; ctx.fillText(ft.text, ft.x, ft.y);
   }
   ctx.globalAlpha = 1;
 }
@@ -641,116 +528,66 @@ function drawFloatingTexts() {
 function drawHUD() {
   if (state.screen !== SCREEN.PLAYING && state.screen !== SCREEN.LEVEL_COMPLETE && state.screen !== SCREEN.LEVEL_FAILED) return;
   if (!state.levelData) return;
-
   const ld = state.levelData;
 
-  // Level title
-  const titleGrad = ctx.createLinearGradient(W / 2 - 80, 0, W / 2 + 80, 0);
-  titleGrad.addColorStop(0, '#ff6bca');
-  titleGrad.addColorStop(0.5, '#ffb347');
-  titleGrad.addColorStop(1, '#ff6bca');
-  ctx.fillStyle = titleGrad;
-  ctx.font = `bold ${Math.floor(cellSize * 0.42)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
+  // User avatar (top-left area, after back button)
+  if (firebase.user) {
+    ctx.font = `${Math.floor(cellSize * 0.25)}px 'Segoe UI', system-ui, sans-serif`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText(firebase.user.displayName || 'Player', 85, 14);
+  }
+
+  const tg = ctx.createLinearGradient(W / 2 - 80, 0, W / 2 + 80, 0);
+  tg.addColorStop(0, '#ff6bca'); tg.addColorStop(0.5, '#ffb347'); tg.addColorStop(1, '#ff6bca');
+  ctx.fillStyle = tg; ctx.font = `bold ${Math.floor(cellSize * 0.42)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(`Level ${state.level}`, W / 2, boardY * 0.2);
 
-  // Score
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillText(state.score.toLocaleString(), W / 2, boardY * 0.48);
 
-  // Moves left
   ctx.font = `${Math.floor(cellSize * 0.3)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillStyle = state.movesLeft <= 5 ? '#ff4757' : state.movesLeft <= 10 ? '#ffa502' : '#aaa';
   ctx.fillText(`${state.movesLeft} moves left`, W / 2, boardY * 0.7);
 
   // Star progress bar
-  const maxScore = ld.stars[2];
-  const barW = cellSize * COLS;
-  const barH = 6;
-  const barX = boardX;
-  const barY = boardY - 12;
+  const maxSc = ld.stars[2], barW = cellSize * COLS, barH = 6, barX = boardX, barY2 = boardY - 12;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; drawRoundedRect(barX, barY2, barW, barH, 3); ctx.fill();
+  const fill = Math.min(state.score / maxSc, 1);
+  if (fill > 0) { const bg = ctx.createLinearGradient(barX, 0, barX + barW, 0); bg.addColorStop(0, '#ff6bca'); bg.addColorStop(1, '#ffb347'); ctx.fillStyle = bg; drawRoundedRect(barX, barY2, Math.max(barW * fill, barH), barH, 3); ctx.fill(); }
+  ctx.font = `${Math.floor(cellSize * 0.28)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  for (let i = 0; i < 3; i++) { ctx.fillStyle = state.score >= ld.stars[i] ? '#ffa502' : '#555'; ctx.fillText('★', barX + (ld.stars[i] / maxSc) * barW, barY2 - 1); }
 
-  // Bar background
-  ctx.fillStyle = 'rgba(255,255,255,0.08)';
-  drawRoundedRect(barX, barY, barW, barH, 3);
-  ctx.fill();
-
-  // Bar fill
-  const fillRatio = Math.min(state.score / maxScore, 1);
-  if (fillRatio > 0) {
-    const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
-    barGrad.addColorStop(0, '#ff6bca');
-    barGrad.addColorStop(1, '#ffb347');
-    ctx.fillStyle = barGrad;
-    drawRoundedRect(barX, barY, Math.max(barW * fillRatio, barH), barH, 3);
-    ctx.fill();
-  }
-
-  // Star markers on bar
-  ctx.font = `${Math.floor(cellSize * 0.28)}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  for (let i = 0; i < 3; i++) {
-    const sx = barX + (ld.stars[i] / maxScore) * barW;
-    ctx.fillStyle = state.score >= ld.stars[i] ? '#ffa502' : '#555';
-    ctx.fillText('★', sx, barY - 1);
-  }
-
-  // Back button (top left)
+  // Back button
   if (state.screen === SCREEN.PLAYING) {
-    ctx.font = `${Math.floor(cellSize * 0.35)}px sans-serif`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.fillText('← Menu', 12, 12);
+    ctx.font = `${Math.floor(cellSize * 0.35)}px sans-serif`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText('← Menu', 12, 12);
   }
 }
 
 function drawBackground() {
   const grad = ctx.createLinearGradient(0, 0, W * 0.3, H);
-  grad.addColorStop(0, '#1a0533');
-  grad.addColorStop(0.35, '#2d1b69');
-  grad.addColorStop(0.65, '#4a1a6b');
-  grad.addColorStop(1, '#1a0533');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, H);
+  grad.addColorStop(0, '#1a0533'); grad.addColorStop(0.35, '#2d1b69'); grad.addColorStop(0.65, '#4a1a6b'); grad.addColorStop(1, '#1a0533');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
 }
 
 // ═══════════════════════════════════════════════════════
 // SECTION 6: GAME LOGIC
 // ═══════════════════════════════════════════════════════
 
-function randomCandy() {
-  return Math.floor(Math.random() * CANDY_TYPES);
-}
+function randomCandy() { return Math.floor(Math.random() * CANDY_TYPES); }
 
 function createBoard(levelData) {
   state.board = [];
   for (let r = 0; r < ROWS; r++) {
     state.board[r] = [];
     for (let c = 0; c < COLS; c++) {
-      const blocker = (levelData && levelData.blockers && levelData.blockers[r] && levelData.blockers[r][c]) || BLOCKER.NONE;
-      if (blocker === BLOCKER.STONE) {
-        state.board[r][c] = makeCell(EMPTY, SPECIAL.NONE, BLOCKER.STONE);
-        continue;
-      }
-      if (blocker === BLOCKER.CHOCOLATE) {
-        state.board[r][c] = makeCell(EMPTY, SPECIAL.NONE, BLOCKER.CHOCOLATE);
-        continue;
-      }
-      let type;
-      let attempts = 0;
-      do {
-        type = randomCandy();
-        attempts++;
-      } while (
-        attempts < 50 &&
-        ((c >= 2 && state.board[r][c-1].type === type && state.board[r][c-2].type === type) ||
-         (r >= 2 && state.board[r-1][c].type === type && state.board[r-2][c].type === type))
-      );
-      state.board[r][c] = makeCell(type, SPECIAL.NONE, blocker);
+      const bl = (levelData && levelData.blockers && levelData.blockers[r] && levelData.blockers[r][c]) || BLOCKER.NONE;
+      if (bl === BLOCKER.STONE) { state.board[r][c] = makeCell(EMPTY, SPECIAL.NONE, BLOCKER.STONE); continue; }
+      if (bl === BLOCKER.CHOCOLATE) { state.board[r][c] = makeCell(EMPTY, SPECIAL.NONE, BLOCKER.CHOCOLATE); continue; }
+      let type, att = 0;
+      do { type = randomCandy(); att++; } while (att < 50 && ((c >= 2 && state.board[r][c - 1].type === type && state.board[r][c - 2].type === type) || (r >= 2 && state.board[r - 1][c].type === type && state.board[r - 2][c].type === type)));
+      state.board[r][c] = makeCell(type, SPECIAL.NONE, bl);
     }
   }
 }
@@ -763,573 +600,181 @@ function isPlayable(r, c) {
 
 function findMatchGroups() {
   const groups = [];
-  // Horizontal
-  for (let r = 0; r < ROWS; r++) {
-    let c = 0;
-    while (c < COLS) {
-      if (!isPlayable(r, c)) { c++; continue; }
-      let end = c;
-      while (end + 1 < COLS && isPlayable(r, end + 1) && state.board[r][end + 1].type === state.board[r][c].type) end++;
-      if (end - c >= 2) {
-        groups.push({ cells: Array.from({ length: end - c + 1 }, (_, i) => ({ r, c: c + i })), dir: 'h' });
-      }
-      c = end + 1;
-    }
-  }
-  // Vertical
-  for (let c = 0; c < COLS; c++) {
-    let r = 0;
-    while (r < ROWS) {
-      if (!isPlayable(r, c)) { r++; continue; }
-      let end = r;
-      while (end + 1 < ROWS && isPlayable(end + 1, c) && state.board[end + 1][c].type === state.board[r][c].type) end++;
-      if (end - r >= 2) {
-        groups.push({ cells: Array.from({ length: end - r + 1 }, (_, i) => ({ r: r + i, c })), dir: 'v' });
-      }
-      r = end + 1;
-    }
-  }
+  for (let r = 0; r < ROWS; r++) { let c = 0; while (c < COLS) { if (!isPlayable(r, c)) { c++; continue; } let end = c; while (end + 1 < COLS && isPlayable(r, end + 1) && state.board[r][end + 1].type === state.board[r][c].type) end++; if (end - c >= 2) groups.push({ cells: Array.from({ length: end - c + 1 }, (_, i) => ({ r, c: c + i })), dir: 'h' }); c = end + 1; } }
+  for (let c = 0; c < COLS; c++) { let r = 0; while (r < ROWS) { if (!isPlayable(r, c)) { r++; continue; } let end = r; while (end + 1 < ROWS && isPlayable(end + 1, c) && state.board[end + 1][c].type === state.board[r][c].type) end++; if (end - r >= 2) groups.push({ cells: Array.from({ length: end - r + 1 }, (_, i) => ({ r: r + i, c })), dir: 'v' }); r = end + 1; } }
   return groups;
 }
 
-function findAllMatchedCells() {
-  const groups = findMatchGroups();
-  const set = new Set();
-  for (const g of groups) {
-    for (const cell of g.cells) set.add(cell.r + ',' + cell.c);
-  }
-  return [...set];
-}
+function findAllMatchedCells() { const g = findMatchGroups(), s = new Set(); for (const gr of g) for (const c of gr.cells) s.add(c.r + ',' + c.c); return [...s]; }
 
 function detectSpecials(groups) {
-  const specials = [];
-  const specialAt = new Set();
-
-  // Check for L/T shapes (intersecting horizontal + vertical groups)
-  for (let i = 0; i < groups.length; i++) {
-    for (let j = i + 1; j < groups.length; j++) {
-      if (groups[i].dir === groups[j].dir) continue;
-      for (const c1 of groups[i].cells) {
-        for (const c2 of groups[j].cells) {
-          if (c1.r === c2.r && c1.c === c2.c) {
-            const key = c1.r + ',' + c1.c;
-            if (!specialAt.has(key)) {
-              specialAt.add(key);
-              specials.push({ r: c1.r, c: c1.c, special: SPECIAL.WRAPPED, type: state.board[c1.r][c1.c].type });
-            }
-          }
-        }
-      }
-    }
-  }
-
+  const specials = [], at = new Set();
+  for (let i = 0; i < groups.length; i++) for (let j = i + 1; j < groups.length; j++) { if (groups[i].dir === groups[j].dir) continue; for (const c1 of groups[i].cells) for (const c2 of groups[j].cells) if (c1.r === c2.r && c1.c === c2.c) { const k = c1.r + ',' + c1.c; if (!at.has(k)) { at.add(k); specials.push({ r: c1.r, c: c1.c, special: SPECIAL.WRAPPED, type: state.board[c1.r][c1.c].type }); } } }
   for (const g of groups) {
-    if (g.cells.length >= 5) {
-      const mid = g.cells[Math.floor(g.cells.length / 2)];
-      const key = mid.r + ',' + mid.c;
-      if (!specialAt.has(key)) {
-        specialAt.add(key);
-        specials.push({ r: mid.r, c: mid.c, special: SPECIAL.COLOR_BOMB, type: state.board[mid.r][mid.c].type });
-      }
-    } else if (g.cells.length === 4) {
-      // Place at the second cell (or first non-special)
-      let placed = false;
-      for (const cell of g.cells) {
-        const key = cell.r + ',' + cell.c;
-        if (!specialAt.has(key)) {
-          specialAt.add(key);
-          specials.push({
-            r: cell.r, c: cell.c,
-            special: g.dir === 'h' ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V,
-            type: state.board[cell.r][cell.c].type,
-          });
-          placed = true;
-          break;
-        }
-      }
-    }
+    if (g.cells.length >= 5) { const m = g.cells[Math.floor(g.cells.length / 2)], k = m.r + ',' + m.c; if (!at.has(k)) { at.add(k); specials.push({ r: m.r, c: m.c, special: SPECIAL.COLOR_BOMB, type: state.board[m.r][m.c].type }); } }
+    else if (g.cells.length === 4) { for (const cell of g.cells) { const k = cell.r + ',' + cell.c; if (!at.has(k)) { at.add(k); specials.push({ r: cell.r, c: cell.c, special: g.dir === 'h' ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V, type: state.board[cell.r][cell.c].type }); break; } } }
   }
-
   return specials;
 }
 
 function getSpecialRemoval(r, c, special) {
-  const toRemove = new Set();
-  if (special === SPECIAL.STRIPED_H) {
-    for (let cc = 0; cc < COLS; cc++) {
-      if (state.board[r][cc].blocker !== BLOCKER.STONE) toRemove.add(r + ',' + cc);
-    }
-  } else if (special === SPECIAL.STRIPED_V) {
-    for (let rr = 0; rr < ROWS; rr++) {
-      if (state.board[rr][c].blocker !== BLOCKER.STONE) toRemove.add(rr + ',' + c);
-    }
-  } else if (special === SPECIAL.WRAPPED) {
-    for (let dr = -1; dr <= 1; dr++) {
-      for (let dc = -1; dc <= 1; dc++) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker !== BLOCKER.STONE) {
-          toRemove.add(nr + ',' + nc);
-        }
-      }
-    }
-  }
-  return toRemove;
-}
-
-function getColorBombRemoval(r, c, targetType) {
-  const toRemove = new Set();
-  toRemove.add(r + ',' + c);
-  for (let rr = 0; rr < ROWS; rr++) {
-    for (let cc = 0; cc < COLS; cc++) {
-      if (state.board[rr][cc].type === targetType) {
-        toRemove.add(rr + ',' + cc);
-      }
-    }
-  }
-  return toRemove;
+  const s = new Set();
+  if (special === SPECIAL.STRIPED_H) { for (let cc = 0; cc < COLS; cc++) if (state.board[r][cc].blocker !== BLOCKER.STONE) s.add(r + ',' + cc); }
+  else if (special === SPECIAL.STRIPED_V) { for (let rr = 0; rr < ROWS; rr++) if (state.board[rr][c].blocker !== BLOCKER.STONE) s.add(rr + ',' + c); }
+  else if (special === SPECIAL.WRAPPED) { for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) { const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker !== BLOCKER.STONE) s.add(nr + ',' + nc); } }
+  return s;
 }
 
 function handleSpecialCombo(r1, c1, r2, c2) {
-  const s1 = state.board[r1][c1].special;
-  const s2 = state.board[r2][c2].special;
+  const s1 = state.board[r1][c1].special, s2 = state.board[r2][c2].special;
   if (s1 === SPECIAL.NONE && s2 === SPECIAL.NONE) return null;
+  const toR = new Set(), isS = s => s === SPECIAL.STRIPED_H || s === SPECIAL.STRIPED_V;
 
-  const toRemove = new Set();
-  const isStriped = s => s === SPECIAL.STRIPED_H || s === SPECIAL.STRIPED_V;
-
-  // Color bomb + Color bomb
-  if (s1 === SPECIAL.COLOR_BOMB && s2 === SPECIAL.COLOR_BOMB) {
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type >= 0 || state.board[r][c].blocker === BLOCKER.CHOCOLATE)
-          toRemove.add(r + ',' + c);
-    return toRemove;
-  }
+  if (s1 === SPECIAL.COLOR_BOMB && s2 === SPECIAL.COLOR_BOMB) { for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type >= 0 || state.board[r][c].blocker === BLOCKER.CHOCOLATE) toR.add(r + ',' + c); return toR; }
 
   // Color bomb + striped
-  if (s1 === SPECIAL.COLOR_BOMB && isStriped(s2)) {
-    const targetType = state.board[r2][c2].type;
-    toRemove.add(r1 + ',' + c1);
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type === targetType) {
-          state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V;
-          const extra = getSpecialRemoval(r, c, state.board[r][c].special);
-          for (const e of extra) toRemove.add(e);
-          toRemove.add(r + ',' + c);
-        }
-    return toRemove;
-  }
-  if (s2 === SPECIAL.COLOR_BOMB && isStriped(s1)) {
-    const targetType = state.board[r1][c1].type;
-    toRemove.add(r2 + ',' + c2);
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type === targetType) {
-          state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V;
-          const extra = getSpecialRemoval(r, c, state.board[r][c].special);
-          for (const e of extra) toRemove.add(e);
-          toRemove.add(r + ',' + c);
-        }
-    return toRemove;
-  }
+  if (s1 === SPECIAL.COLOR_BOMB && isS(s2)) { const tt = state.board[r2][c2].type; toR.add(r1 + ',' + c1); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type === tt) { state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V; for (const e of getSpecialRemoval(r, c, state.board[r][c].special)) toR.add(e); toR.add(r + ',' + c); } return toR; }
+  if (s2 === SPECIAL.COLOR_BOMB && isS(s1)) { const tt = state.board[r1][c1].type; toR.add(r2 + ',' + c2); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type === tt) { state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V; for (const e of getSpecialRemoval(r, c, state.board[r][c].special)) toR.add(e); toR.add(r + ',' + c); } return toR; }
 
   // Color bomb + wrapped
-  if (s1 === SPECIAL.COLOR_BOMB && s2 === SPECIAL.WRAPPED) {
-    const targetType = state.board[r2][c2].type;
-    toRemove.add(r1 + ',' + c1);
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type === targetType) {
-          const extra = getSpecialRemoval(r, c, SPECIAL.WRAPPED);
-          for (const e of extra) toRemove.add(e);
-          toRemove.add(r + ',' + c);
-        }
-    return toRemove;
-  }
-  if (s2 === SPECIAL.COLOR_BOMB && s1 === SPECIAL.WRAPPED) {
-    const targetType = state.board[r1][c1].type;
-    toRemove.add(r2 + ',' + c2);
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type === targetType) {
-          const extra = getSpecialRemoval(r, c, SPECIAL.WRAPPED);
-          for (const e of extra) toRemove.add(e);
-          toRemove.add(r + ',' + c);
-        }
-    return toRemove;
-  }
+  if (s1 === SPECIAL.COLOR_BOMB && s2 === SPECIAL.WRAPPED) { const tt = state.board[r2][c2].type; toR.add(r1 + ',' + c1); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type === tt) { for (const e of getSpecialRemoval(r, c, SPECIAL.WRAPPED)) toR.add(e); toR.add(r + ',' + c); } return toR; }
+  if (s2 === SPECIAL.COLOR_BOMB && s1 === SPECIAL.WRAPPED) { const tt = state.board[r1][c1].type; toR.add(r2 + ',' + c2); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type === tt) { for (const e of getSpecialRemoval(r, c, SPECIAL.WRAPPED)) toR.add(e); toR.add(r + ',' + c); } return toR; }
 
-  // Color bomb + normal: all of that color become striped then detonate
-  if (s1 === SPECIAL.COLOR_BOMB) {
-    const targetType = state.board[r2][c2].type;
-    toRemove.add(r1 + ',' + c1);
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type === targetType) {
-          state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V;
-          const extra = getSpecialRemoval(r, c, state.board[r][c].special);
-          for (const e of extra) toRemove.add(e);
-          toRemove.add(r + ',' + c);
-        }
-    return toRemove;
-  }
-  if (s2 === SPECIAL.COLOR_BOMB) {
-    const targetType = state.board[r1][c1].type;
-    toRemove.add(r2 + ',' + c2);
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (state.board[r][c].type === targetType) {
-          state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V;
-          const extra = getSpecialRemoval(r, c, state.board[r][c].special);
-          for (const e of extra) toRemove.add(e);
-          toRemove.add(r + ',' + c);
-        }
-    return toRemove;
-  }
+  // Color bomb + normal
+  if (s1 === SPECIAL.COLOR_BOMB) { const tt = state.board[r2][c2].type; toR.add(r1 + ',' + c1); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type === tt) { state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V; for (const e of getSpecialRemoval(r, c, state.board[r][c].special)) toR.add(e); toR.add(r + ',' + c); } return toR; }
+  if (s2 === SPECIAL.COLOR_BOMB) { const tt = state.board[r1][c1].type; toR.add(r2 + ',' + c2); for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].type === tt) { state.board[r][c].special = Math.random() > 0.5 ? SPECIAL.STRIPED_H : SPECIAL.STRIPED_V; for (const e of getSpecialRemoval(r, c, state.board[r][c].special)) toR.add(e); toR.add(r + ',' + c); } return toR; }
 
-  // Striped + Striped = cross
-  if (isStriped(s1) && isStriped(s2)) {
-    for (let cc = 0; cc < COLS; cc++) {
-      if (state.board[r1][cc].blocker !== BLOCKER.STONE) toRemove.add(r1 + ',' + cc);
-      if (state.board[r2][cc].blocker !== BLOCKER.STONE) toRemove.add(r2 + ',' + cc);
-    }
-    for (let rr = 0; rr < ROWS; rr++) {
-      if (state.board[rr][c1].blocker !== BLOCKER.STONE) toRemove.add(rr + ',' + c1);
-      if (state.board[rr][c2].blocker !== BLOCKER.STONE) toRemove.add(rr + ',' + c2);
-    }
-    return toRemove;
-  }
+  if (isS(s1) && isS(s2)) { for (let cc = 0; cc < COLS; cc++) { if (state.board[r1][cc].blocker !== BLOCKER.STONE) toR.add(r1 + ',' + cc); if (state.board[r2][cc].blocker !== BLOCKER.STONE) toR.add(r2 + ',' + cc); } for (let rr = 0; rr < ROWS; rr++) { if (state.board[rr][c1].blocker !== BLOCKER.STONE) toR.add(rr + ',' + c1); if (state.board[rr][c2].blocker !== BLOCKER.STONE) toR.add(rr + ',' + c2); } return toR; }
+  if (s1 === SPECIAL.WRAPPED && s2 === SPECIAL.WRAPPED) { const cr = Math.floor((r1 + r2) / 2), cc = Math.floor((c1 + c2) / 2); for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) { const nr = cr + dr, nc = cc + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker !== BLOCKER.STONE) toR.add(nr + ',' + nc); } return toR; }
+  if ((isS(s1) && s2 === SPECIAL.WRAPPED) || (s1 === SPECIAL.WRAPPED && isS(s2))) { const cr = Math.floor((r1 + r2) / 2), cc = Math.floor((c1 + c2) / 2); for (let d = -1; d <= 1; d++) { for (let i = 0; i < COLS; i++) { const nr = cr + d; if (nr >= 0 && nr < ROWS && state.board[nr][i].blocker !== BLOCKER.STONE) toR.add(nr + ',' + i); } for (let i = 0; i < ROWS; i++) { const nc = cc + d; if (nc >= 0 && nc < COLS && state.board[i][nc].blocker !== BLOCKER.STONE) toR.add(i + ',' + nc); } } return toR; }
 
-  // Wrapped + Wrapped = 5x5
-  if (s1 === SPECIAL.WRAPPED && s2 === SPECIAL.WRAPPED) {
-    const cr = Math.floor((r1 + r2) / 2), cc = Math.floor((c1 + c2) / 2);
-    for (let dr = -2; dr <= 2; dr++)
-      for (let dc = -2; dc <= 2; dc++) {
-        const nr = cr + dr, nc = cc + dc;
-        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker !== BLOCKER.STONE)
-          toRemove.add(nr + ',' + nc);
-      }
-    return toRemove;
-  }
-
-  // Striped + Wrapped = 3 rows + 3 cols
-  if ((isStriped(s1) && s2 === SPECIAL.WRAPPED) || (s1 === SPECIAL.WRAPPED && isStriped(s2))) {
-    const cr = Math.floor((r1 + r2) / 2), cc = Math.floor((c1 + c2) / 2);
-    for (let d = -1; d <= 1; d++) {
-      for (let i = 0; i < COLS; i++) {
-        const nr = cr + d;
-        if (nr >= 0 && nr < ROWS && state.board[nr][i].blocker !== BLOCKER.STONE) toRemove.add(nr + ',' + i);
-      }
-      for (let i = 0; i < ROWS; i++) {
-        const nc = cc + d;
-        if (nc >= 0 && nc < COLS && state.board[i][nc].blocker !== BLOCKER.STONE) toRemove.add(i + ',' + nc);
-      }
-    }
-    return toRemove;
-  }
-
-  // One special + one normal: activate the special during match processing
-  // But if it's a striped/wrapped being swapped without making a match, still allow swap
-  // The special will be activated if its cell is part of a match
   return null;
 }
 
-function swap(r1, c1, r2, c2) {
-  const tmp = state.board[r1][c1];
-  state.board[r1][c1] = state.board[r2][c2];
-  state.board[r2][c2] = tmp;
-}
+function swap(r1, c1, r2, c2) { const t = state.board[r1][c1]; state.board[r1][c1] = state.board[r2][c2]; state.board[r2][c2] = t; }
 
 function gravity() {
   const newTiles = [];
   for (let c = 0; c < COLS; c++) {
-    // Process sections separated by blockers independently
-    // Find blocker positions in this column
-    const blockerRows = new Set();
-    for (let r = 0; r < ROWS; r++) {
-      const cell = state.board[r][c];
-      if (cell.blocker === BLOCKER.STONE || cell.blocker === BLOCKER.CHOCOLATE) {
-        blockerRows.add(r);
-      }
-    }
-
-    // Process each section (from bottom of section upward)
-    let sectionEnd = ROWS - 1;
-    while (sectionEnd >= 0) {
-      if (blockerRows.has(sectionEnd)) {
-        sectionEnd--;
-        continue;
-      }
-      // Find the top of this section
-      let sectionStart = sectionEnd;
-      while (sectionStart > 0 && !blockerRows.has(sectionStart - 1)) {
-        sectionStart--;
-      }
-
-      // Compact candies downward within this section
-      let writePos = sectionEnd;
-      for (let r = sectionEnd; r >= sectionStart; r--) {
-        const cell = state.board[r][c];
-        if (cell.type >= 0) {
-          if (r !== writePos) {
-            state.board[writePos][c] = cell;
-            state.board[r][c] = makeCell(EMPTY);
-          }
-          writePos--;
-        }
-      }
-      // Fill empty cells from top of section
-      for (let r = writePos; r >= sectionStart; r--) {
-        if (state.board[r][c].type === EMPTY && state.board[r][c].blocker === BLOCKER.NONE) {
-          state.board[r][c] = makeCell(randomCandy());
-          newTiles.push({ r, c });
-        }
-      }
-
-      sectionEnd = sectionStart - 1;
+    const bRows = new Set();
+    for (let r = 0; r < ROWS; r++) { const cell = state.board[r][c]; if (cell.blocker === BLOCKER.STONE || cell.blocker === BLOCKER.CHOCOLATE) bRows.add(r); }
+    let se = ROWS - 1;
+    while (se >= 0) {
+      if (bRows.has(se)) { se--; continue; }
+      let ss = se; while (ss > 0 && !bRows.has(ss - 1)) ss--;
+      let wp = se;
+      for (let r = se; r >= ss; r--) { if (state.board[r][c].type >= 0) { if (r !== wp) { state.board[wp][c] = state.board[r][c]; state.board[r][c] = makeCell(EMPTY); } wp--; } }
+      for (let r = wp; r >= ss; r--) { if (state.board[r][c].type === EMPTY && state.board[r][c].blocker === BLOCKER.NONE) { state.board[r][c] = makeCell(randomCandy()); state.board[r][c].scale = 0; newTiles.push({ r, c }); } }
+      se = ss - 1;
     }
   }
   return newTiles;
 }
 
 function spreadChocolate() {
-  const chocCells = [];
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++)
-      if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) chocCells.push({ r, c });
-
-  if (chocCells.length === 0) return false;
-
-  const candidates = [];
-  for (const { r, c } of chocCells) {
-    for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
-      const nr = r + dr, nc = c + dc;
-      if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS &&
-          state.board[nr][nc].type >= 0 && state.board[nr][nc].blocker === BLOCKER.NONE) {
-        candidates.push({ r: nr, c: nc });
-      }
-    }
-  }
-  if (candidates.length > 0) {
-    const target = candidates[Math.floor(Math.random() * candidates.length)];
-    state.board[target.r][target.c] = makeCell(EMPTY, SPECIAL.NONE, BLOCKER.CHOCOLATE);
-    const pos = cellToScreen(target.r, target.c);
-    addParticle(pos.x, pos.y, '#5c3317', 4);
-    return true;
-  }
-  return false;
+  const chocs = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) chocs.push({ r, c });
+  if (!chocs.length) return;
+  const cands = [];
+  for (const { r, c } of chocs) for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) { const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].type >= 0 && state.board[nr][nc].blocker === BLOCKER.NONE) cands.push({ r: nr, c: nc }); }
+  if (cands.length) { const t = cands[Math.floor(Math.random() * cands.length)]; state.board[t.r][t.c] = makeCell(EMPTY, SPECIAL.NONE, BLOCKER.CHOCOLATE); addParticle(cellToScreen(t.r, t.c).x, cellToScreen(t.r, t.c).y, '#5c3317', 4); }
 }
 
 function clearAdjacentChocolate(matchedSet) {
-  const removed = [];
-  for (const key of matchedSet) {
-    const [r, c] = key.split(',').map(Number);
-    for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
-      const nr = r + dr, nc = c + dc;
-      if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker === BLOCKER.CHOCOLATE) {
-        const chocKey = nr + ',' + nc;
-        if (!removed.some(x => x.r === nr && x.c === nc)) {
-          removed.push({ r: nr, c: nc });
-        }
-      }
-    }
-  }
-  for (const { r, c } of removed) {
-    state.board[r][c] = makeCell(EMPTY);
-    const pos = cellToScreen(r, c);
-    addParticle(pos.x, pos.y, '#7b4a2b', 8);
-    addFloatingText(pos.x, pos.y, '💥', '#ffb347');
-  }
-  return removed.length > 0;
+  const rm = [];
+  for (const key of matchedSet) { const [r, c] = key.split(',').map(Number); for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) { const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker === BLOCKER.CHOCOLATE && !rm.some(x => x.r === nr && x.c === nc)) rm.push({ r: nr, c: nc }); } }
+  for (const { r, c } of rm) { state.board[r][c] = makeCell(EMPTY); const p = cellToScreen(r, c); addParticle(p.x, p.y, '#7b4a2b', 8); }
+  return rm.length > 0;
 }
 
 function clearIceAt(r, c) {
-  const cell = state.board[r][c];
-  if (cell.blocker === BLOCKER.ICE2) {
-    cell.blocker = BLOCKER.ICE1;
-    const pos = cellToScreen(r, c);
-    addParticle(pos.x, pos.y, '#aaddff', 4);
-    return true;
-  } else if (cell.blocker === BLOCKER.ICE1) {
-    cell.blocker = BLOCKER.NONE;
-    const pos = cellToScreen(r, c);
-    addParticle(pos.x, pos.y, '#aaddff', 6);
-    return true;
-  }
+  const cell = state.board[r][c]; const p = cellToScreen(r, c);
+  if (cell.blocker === BLOCKER.ICE2) { cell.blocker = BLOCKER.ICE1; addParticle(p.x, p.y, '#aaddff', 4); return true; }
+  if (cell.blocker === BLOCKER.ICE1) { cell.blocker = BLOCKER.NONE; addParticle(p.x, p.y, '#aaddff', 6); return true; }
   return false;
 }
 
+async function animateNewTiles(tiles) {
+  const promises = [];
+  for (const { r, c } of tiles) {
+    const cell = state.board[r][c];
+    if (cell && cell.scale === 0) { cell.scale = 0; promises.push(tween(cell, { scale: 1 }, 0.2, 'bounce')); }
+  }
+  await Promise.all(promises);
+}
+
 async function processMatches() {
-  let cascade = 0;
-  let clearedChocolateThisTurn = false;
-
+  let cascade = 0, clearedChoc = false;
   while (true) {
-    const groups = findMatchGroups();
-    const allMatched = findAllMatchedCells();
-    if (allMatched.length === 0) break;
-
-    cascade++;
-    state.cascade = cascade;
-
-    // Detect specials
+    const groups = findMatchGroups(), allM = findAllMatchedCells();
+    if (!allM.length) break;
+    cascade++; state.cascade = cascade;
     const specials = detectSpecials(groups);
 
-    // Score
     let pts = 0;
-    for (const g of groups) {
-      if (g.cells.length === 3) pts += 30;
-      else if (g.cells.length === 4) pts += 60;
-      else if (g.cells.length >= 5) pts += 100;
-    }
-    // L/T shapes (wrapped specials from intersections) get bonus
-    for (const s of specials) {
-      if (s.special === SPECIAL.WRAPPED) pts += 80;
-      else if (s.special === SPECIAL.COLOR_BOMB) pts += 100;
-      else pts += 50; // striped
-    }
-    const multiplier = cascade > 1 ? cascade : 1;
-    state.score += pts * multiplier;
-
+    for (const g of groups) { if (g.cells.length === 3) pts += 30; else if (g.cells.length === 4) pts += 60; else pts += 100; }
+    for (const s of specials) { if (s.special === SPECIAL.WRAPPED) pts += 80; else if (s.special === SPECIAL.COLOR_BOMB) pts += 100; else pts += 50; }
+    const mult = cascade > 1 ? cascade : 1;
+    state.score += pts * mult;
     sfxMatch(cascade);
 
-    if (cascade > 1) {
-      state.shakeAmount = Math.min(cascade * 3, 12);
-      state.shakeTime = 0;
-      addFloatingText(W / 2, boardY - 30, cascade + 'x COMBO!', '#ff6bca', Math.floor(cellSize * 0.5));
-    }
+    if (cascade > 1) { state.shakeAmount = Math.min(cascade * 3, 12); state.shakeTime = 0; addFloatingText(W / 2, boardY - 30, cascade + 'x COMBO!', '#ff6bca', Math.floor(cellSize * 0.5)); }
 
-    // Activate specials that are being destroyed
-    const matchedSet = new Set(allMatched);
-    const specialPositions = new Set(specials.map(s => s.r + ',' + s.c));
-    const extraRemove = new Set();
+    const matchedSet = new Set(allM), specPos = new Set(specials.map(s => s.r + ',' + s.c)), extraR = new Set();
+    for (const key of matchedSet) { if (specPos.has(key)) continue; const [r, c] = key.split(',').map(Number); const cell = state.board[r][c]; if (cell.special !== SPECIAL.NONE && cell.special !== SPECIAL.COLOR_BOMB) { sfxExplosion(); for (const e of getSpecialRemoval(r, c, cell.special)) extraR.add(e); addParticle(cellToScreen(r, c).x, cellToScreen(r, c).y, '#fff', 12); state.shakeAmount = Math.max(state.shakeAmount, 8); state.shakeTime = 0; } }
+    for (const e of extraR) matchedSet.add(e);
 
+    if (clearAdjacentChocolate(matchedSet)) clearedChoc = true;
+
+    // Animate match dissolve
+    const dissolveTweens = [];
     for (const key of matchedSet) {
-      if (specialPositions.has(key)) continue;
-      const [r, c] = key.split(',').map(Number);
-      const cell = state.board[r][c];
-      if (cell.special !== SPECIAL.NONE && cell.special !== SPECIAL.COLOR_BOMB) {
-        sfxExplosion();
-        const extra = getSpecialRemoval(r, c, cell.special);
-        for (const e of extra) extraRemove.add(e);
-        const pos = cellToScreen(r, c);
-        addParticle(pos.x, pos.y, '#fff', 12);
-        state.shakeAmount = Math.max(state.shakeAmount, 8);
-        state.shakeTime = 0;
-      }
-    }
-    for (const e of extraRemove) matchedSet.add(e);
-
-    // Chain: if extra removal hits more specials
-    const chainCheck = new Set(extraRemove);
-    for (const key of chainCheck) {
-      if (matchedSet.has(key)) {
-        const [r, c] = key.split(',').map(Number);
-        const cell = state.board[r][c];
-        if (cell.special !== SPECIAL.NONE && cell.special !== SPECIAL.COLOR_BOMB && !specialPositions.has(key)) {
-          const extra2 = getSpecialRemoval(r, c, cell.special);
-          for (const e of extra2) matchedSet.add(e);
-          sfxExplosion();
-        }
-      }
-    }
-
-    // Clear adjacent chocolate
-    if (clearAdjacentChocolate(matchedSet)) {
-      clearedChocolateThisTurn = true;
-    }
-
-    // Particles for matches
-    for (const key of matchedSet) {
+      if (specPos.has(key)) continue;
       const [r, c] = key.split(',').map(Number);
       const cell = state.board[r][c];
       if (cell.type >= 0) {
-        const pos = cellToScreen(r, c);
-        addParticle(pos.x, pos.y, COLORS[cell.type % CANDY_TYPES].main, 5);
+        const p = cellToScreen(r, c); addParticle(p.x, p.y, COLORS[cell.type % CANDY_TYPES].main, 5);
+        cell.scale = 1; cell.alpha = 1;
+        dissolveTweens.push(tween(cell, { scale: 1.3, alpha: 0 }, 0.25, 'easeOut'));
       }
     }
+    if (dissolveTweens.length) await Promise.all(dissolveTweens);
 
-    // Score popup
-    if (groups.length > 0) {
-      const midGroup = groups[0].cells[Math.floor(groups[0].cells.length / 2)];
-      const pos = cellToScreen(midGroup.r, midGroup.c);
-      addFloatingText(pos.x, pos.y - 5, '+' + (pts * multiplier), cascade > 1 ? '#ffb347' : '#fff');
-    }
+    if (groups.length > 0) { const mg = groups[0].cells[Math.floor(groups[0].cells.length / 2)]; const p = cellToScreen(mg.r, mg.c); addFloatingText(p.x, p.y - 5, '+' + (pts * mult), cascade > 1 ? '#ffb347' : '#fff'); }
 
-    // Remove matched cells but preserve new specials
-    for (const key of matchedSet) {
-      const [r, c] = key.split(',').map(Number);
-      if (specialPositions.has(key)) continue;
-      clearIceAt(r, c);
-      if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) {
-        state.board[r][c] = makeCell(EMPTY);
-      } else if (state.board[r][c].blocker !== BLOCKER.STONE) {
-        state.board[r][c] = makeCell(EMPTY);
-      }
-    }
+    for (const key of matchedSet) { const [r, c] = key.split(',').map(Number); if (specPos.has(key)) continue; clearIceAt(r, c); if (state.board[r][c].blocker !== BLOCKER.STONE) state.board[r][c] = makeCell(EMPTY); }
+    for (const s of specials) { state.board[s.r][s.c] = makeCell(s.type, s.special); state.board[s.r][s.c].scale = 0; sfxSpecialCreate(); addParticle(cellToScreen(s.r, s.c).x, cellToScreen(s.r, s.c).y, '#fff', 8); }
 
-    // Place specials
-    for (const s of specials) {
-      state.board[s.r][s.c] = makeCell(s.type, s.special);
-      sfxSpecialCreate();
-      const pos = cellToScreen(s.r, s.c);
-      addParticle(pos.x, pos.y, '#fff', 8);
-    }
+    // Animate special creation
+    const specTweens = [];
+    for (const s of specials) specTweens.push(tween(state.board[s.r][s.c], { scale: 1 }, 0.3, 'bounce'));
+    if (specTweens.length) await Promise.all(specTweens);
 
-    await sleep(280);
-
-    // Gravity
-    gravity();
-    await sleep(220);
+    await sleep(80);
+    const newTiles = gravity();
+    await sleep(80);
+    await animateNewTiles(newTiles);
+    await sleep(80);
   }
-
-  // Spread chocolate if none was cleared
-  if (!clearedChocolateThisTurn) {
-    spreadChocolate();
-  }
-
+  if (!clearedChoc) spreadChocolate();
   state.cascade = 0;
 }
 
 async function endOfLevelBonus() {
   state.bonusPhase = true;
-  const bonusMoves = Math.max(state.movesLeft, 0);
-  if (bonusMoves === 0) { state.bonusPhase = false; return; }
-  for (let i = 0; i < bonusMoves; i++) {
-    const playable = [];
-    for (let r = 0; r < ROWS; r++)
-      for (let c = 0; c < COLS; c++)
-        if (isPlayable(r, c)) playable.push({ r, c });
-    if (playable.length === 0) break;
-
-    const target = playable[Math.floor(Math.random() * playable.length)];
-    const specTypes = [SPECIAL.STRIPED_H, SPECIAL.STRIPED_V, SPECIAL.WRAPPED];
-    const specType = specTypes[Math.floor(Math.random() * specTypes.length)];
-    state.board[target.r][target.c].special = specType;
-
-    const removed = getSpecialRemoval(target.r, target.c, specType);
-    sfxExplosion();
-    state.shakeAmount = 5;
-    state.shakeTime = 0;
-
-    for (const key of removed) {
-      const [rr, cc] = key.split(',').map(Number);
-      if (state.board[rr][cc].type >= 0 && state.board[rr][cc].blocker !== BLOCKER.STONE) {
-        const pos = cellToScreen(rr, cc);
-        addParticle(pos.x, pos.y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 4);
-        state.board[rr][cc] = makeCell(EMPTY);
-      }
-    }
-    const bonusPts = 50 + removed.size * 10;
-    state.score += bonusPts;
-    state.movesLeft--;
-
-    const pos = cellToScreen(target.r, target.c);
-    addFloatingText(pos.x, pos.y, '+' + bonusPts, '#ffb347');
-
-    await sleep(180);
-    gravity();
-    await sleep(120);
+  const n = Math.max(state.movesLeft, 0);
+  if (!n) { state.bonusPhase = false; return; }
+  for (let i = 0; i < n; i++) {
+    const play = []; for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (isPlayable(r, c)) play.push({ r, c });
+    if (!play.length) break;
+    const t = play[Math.floor(Math.random() * play.length)];
+    const st = [SPECIAL.STRIPED_H, SPECIAL.STRIPED_V, SPECIAL.WRAPPED][Math.floor(Math.random() * 3)];
+    state.board[t.r][t.c].special = st;
+    const rm = getSpecialRemoval(t.r, t.c, st); sfxExplosion(); state.shakeAmount = 5; state.shakeTime = 0;
+    for (const key of rm) { const [rr, cc] = key.split(',').map(Number); if (state.board[rr][cc].type >= 0 && state.board[rr][cc].blocker !== BLOCKER.STONE) { addParticle(cellToScreen(rr, cc).x, cellToScreen(rr, cc).y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 4); state.board[rr][cc] = makeCell(EMPTY); } }
+    const bp = 50 + rm.size * 10; state.score += bp; state.movesLeft--;
+    addFloatingText(cellToScreen(t.r, t.c).x, cellToScreen(t.r, t.c).y, '+' + bp, '#ffb347');
+    await sleep(150); gravity(); await sleep(100);
   }
   state.bonusPhase = false;
 }
@@ -1338,181 +783,77 @@ async function trySwap(r, c) {
   if (state.animating || state.screen !== SCREEN.PLAYING) return;
   state.animating = true;
   const sr = state.selected.r, sc = state.selected.c;
-  state.selected = null;
-  state.hintTimer = 0;
-  state.hintMove = null;
-
+  state.selected = null; state.hintTimer = 0; state.hintMove = null;
   ensureAudio();
 
-  // Check for special combo
-  const comboResult = handleSpecialCombo(sr, sc, r, c);
-  if (comboResult) {
-    sfxSwap();
-    swap(sr, sc, r, c);
-    state.movesLeft--;
-
-    sfxExplosion();
-    state.shakeAmount = 12;
-    state.shakeTime = 0;
-
-    for (const key of comboResult) {
-      const [rr, cc] = key.split(',').map(Number);
-      if (state.board[rr][cc].blocker === BLOCKER.STONE) continue;
-      clearIceAt(rr, cc);
-      const pos = cellToScreen(rr, cc);
-      if (state.board[rr][cc].type >= 0) {
-        addParticle(pos.x, pos.y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 6);
-      } else if (state.board[rr][cc].blocker === BLOCKER.CHOCOLATE) {
-        addParticle(pos.x, pos.y, '#7b4a2b', 6);
-      }
-      state.board[rr][cc] = makeCell(EMPTY);
-    }
-    state.score += comboResult.size * 30;
-    addFloatingText(W / 2, H / 2, '+' + (comboResult.size * 30), '#ff6bca', Math.floor(cellSize * 0.6));
-
-    await sleep(350);
-    gravity();
-    await sleep(250);
-    await processMatches();
-    state.animating = false;
-    await checkLevelEnd();
-    return;
-  }
-
-  // Normal swap
+  // Animate swap
+  const c1 = state.board[sr][sc], c2 = state.board[r][c];
+  const p1 = cellToScreen(sr, sc), p2 = cellToScreen(r, c);
+  c1.drawX = p1.x; c1.drawY = p1.y; c2.drawX = p2.x; c2.drawY = p2.y;
   swap(sr, sc, r, c);
-  const matches = findAllMatchedCells();
+  const nc1 = state.board[sr][sc], nc2 = state.board[r][c];
+  nc1.drawX = p2.x; nc1.drawY = p2.y; nc2.drawX = p1.x; nc2.drawY = p1.y;
+  await Promise.all([tween(nc1, { drawX: p1.x, drawY: p1.y }, 0.18, 'easeInOut'), tween(nc2, { drawX: p2.x, drawY: p2.y }, 0.18, 'easeInOut')]);
+  delete nc1.drawX; delete nc1.drawY; delete nc2.drawX; delete nc2.drawY;
 
-  if (matches.length === 0) {
-    sfxBadSwap();
-    swap(sr, sc, r, c);
-    await sleep(200);
-    state.animating = false;
-    return;
+  const combo = handleSpecialCombo(sr, sc, r, c);
+  if (combo) {
+    sfxSwap(); state.movesLeft--;
+    sfxExplosion(); state.shakeAmount = 12; state.shakeTime = 0;
+    for (const key of combo) { const [rr, cc] = key.split(',').map(Number); if (state.board[rr][cc].blocker === BLOCKER.STONE) continue; clearIceAt(rr, cc); const p = cellToScreen(rr, cc); if (state.board[rr][cc].type >= 0) addParticle(p.x, p.y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 6); else if (state.board[rr][cc].blocker === BLOCKER.CHOCOLATE) addParticle(p.x, p.y, '#7b4a2b', 6); state.board[rr][cc] = makeCell(EMPTY); }
+    state.score += combo.size * 30; addFloatingText(W / 2, H / 2, '+' + (combo.size * 30), '#ff6bca', Math.floor(cellSize * 0.6));
+    await sleep(200); const nt = gravity(); await sleep(100); await animateNewTiles(nt); await processMatches();
+    state.animating = false; await checkLevelEnd(); return;
   }
 
-  sfxSwap();
-  state.movesLeft--;
+  const matches = findAllMatchedCells();
+  if (!matches.length) {
+    sfxBadSwap();
+    // Animate swap back
+    swap(sr, sc, r, c);
+    const b1 = state.board[sr][sc], b2 = state.board[r][c];
+    b1.drawX = p2.x; b1.drawY = p2.y; b2.drawX = p1.x; b2.drawY = p1.y;
+    await Promise.all([tween(b1, { drawX: p1.x, drawY: p1.y }, 0.18, 'easeInOut'), tween(b2, { drawX: p2.x, drawY: p2.y }, 0.18, 'easeInOut')]);
+    delete b1.drawX; delete b1.drawY; delete b2.drawX; delete b2.drawY;
+    state.animating = false; return;
+  }
 
-  await processMatches();
-  state.animating = false;
-
-  await checkLevelEnd();
+  sfxSwap(); state.movesLeft--;
+  await processMatches(); state.animating = false; await checkLevelEnd();
 }
 
 function hasValidMoves() {
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      if (!isPlayable(r, c)) continue;
-      const s = state.board[r][c].special;
-      // Color bombs can always be swapped with any adjacent candy
-      if (s === SPECIAL.COLOR_BOMB) {
-        for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
-          const nr = r + dr, nc = c + dc;
-          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && isPlayable(nr, nc)) {
-            return { r, c, r2: nr, c2: nc };
-          }
-        }
-      }
-      // Any two adjacent specials form a valid combo
-      if (s !== SPECIAL.NONE) {
-        for (const [dr, dc] of [[0, 1], [1, 0]]) {
-          const nr = r + dr, nc = c + dc;
-          if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && isPlayable(nr, nc) &&
-              state.board[nr][nc].special !== SPECIAL.NONE) {
-            return { r, c, r2: nr, c2: nc };
-          }
-        }
-      }
-      if (c + 1 < COLS && isPlayable(r, c + 1)) {
-        swap(r, c, r, c + 1);
-        const has = findAllMatchedCells().length > 0;
-        swap(r, c, r, c + 1);
-        if (has) return { r, c, r2: r, c2: c + 1 };
-      }
-      if (r + 1 < ROWS && isPlayable(r + 1, c)) {
-        swap(r, c, r + 1, c);
-        const has = findAllMatchedCells().length > 0;
-        swap(r, c, r + 1, c);
-        if (has) return { r, c, r2: r + 1, c2: c };
-      }
-    }
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (!isPlayable(r, c)) continue;
+    const s = state.board[r][c].special;
+    if (s === SPECIAL.COLOR_BOMB) { for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) { const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && isPlayable(nr, nc)) return { r, c, r2: nr, c2: nc }; } }
+    if (s !== SPECIAL.NONE) { for (const [dr, dc] of [[0, 1], [1, 0]]) { const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && isPlayable(nr, nc) && state.board[nr][nc].special !== SPECIAL.NONE) return { r, c, r2: nr, c2: nc }; } }
+    if (c + 1 < COLS && isPlayable(r, c + 1)) { swap(r, c, r, c + 1); const h = findAllMatchedCells().length > 0; swap(r, c, r, c + 1); if (h) return { r, c, r2: r, c2: c + 1 }; }
+    if (r + 1 < ROWS && isPlayable(r + 1, c)) { swap(r, c, r + 1, c); const h = findAllMatchedCells().length > 0; swap(r, c, r + 1, c); if (h) return { r, c, r2: r + 1, c2: c }; }
   }
   return null;
 }
 
 function shuffleBoard() {
-  const playable = [];
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++)
-      if (isPlayable(r, c) && state.board[r][c].special === SPECIAL.NONE)
-        playable.push({ r, c });
+  const play = []; for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (isPlayable(r, c) && state.board[r][c].special === SPECIAL.NONE) play.push({ r, c });
+  for (let i = play.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)), a = play[i], b = play[j]; const t = state.board[a.r][a.c].type; state.board[a.r][a.c].type = state.board[b.r][b.c].type; state.board[b.r][b.c].type = t; }
+  let att = 0; while (findAllMatchedCells().length > 0 && att < 200) { const a = play[Math.floor(Math.random() * play.length)]; state.board[a.r][a.c].type = randomCandy(); att++; }
+}
 
-  for (let i = playable.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const a = playable[i], b = playable[j];
-    const tmpType = state.board[a.r][a.c].type;
-    state.board[a.r][a.c].type = state.board[b.r][b.c].type;
-    state.board[b.r][b.c].type = tmpType;
-  }
-
-  // Ensure no initial matches after shuffle
-  let attempts = 0;
-  while (findAllMatchedCells().length > 0 && attempts < 200) {
-    const a = playable[Math.floor(Math.random() * playable.length)];
-    state.board[a.r][a.c].type = randomCandy();
-    attempts++;
-  }
+async function showWin() {
+  if (state.movesLeft > 0) await endOfLevelBonus();
+  const ld = state.levelData;
+  const es = state.score >= ld.stars[2] ? 3 : state.score >= ld.stars[1] ? 2 : 1;
+  state.stars = es;
+  const prev = state.progress[state.level] || 0;
+  if (es > prev) { state.progress[state.level] = es; await saveProgress(); }
+  state.screen = SCREEN.LEVEL_COMPLETE; sfxWin(); addConfetti(W / 2, H * 0.35, 40);
 }
 
 async function checkLevelEnd() {
   if (state.screen !== SCREEN.PLAYING) return;
-  const ld = state.levelData;
-
-  if (state.movesLeft <= 0) {
-    if (state.score >= ld.stars[0]) {
-      // Win! (no moves left, but score met)
-      await showWin();
-    } else {
-      state.screen = SCREEN.LEVEL_FAILED;
-      sfxLose();
-    }
-    return;
-  }
-
-  // Check if score target met with moves remaining — win with bonus!
-  // Only trigger once score crosses the 1-star threshold for the first time
-  // We don't auto-win mid-game; player keeps playing until out of moves.
-
-  // Auto-shuffle if no valid moves
-  const validMove = hasValidMoves();
-  if (!validMove) {
-    shuffleBoard();
-    addFloatingText(W / 2, H / 2, 'SHUFFLE!', '#ffb347', Math.floor(cellSize * 0.6));
-    // Check again after shuffle
-    if (!hasValidMoves()) {
-      shuffleBoard();
-    }
-  }
-}
-
-async function showWin() {
-  // Run end-of-level bonus: convert remaining moves to specials
-  if (state.movesLeft > 0) {
-    await endOfLevelBonus();
-  }
-
-  const ld = state.levelData;
-  const earnedStars = state.score >= ld.stars[2] ? 3 : state.score >= ld.stars[1] ? 2 : 1;
-  state.stars = earnedStars;
-  const prev = state.progress[state.level] || 0;
-  if (earnedStars > prev) {
-    state.progress[state.level] = earnedStars;
-    saveProgress();
-  }
-  state.screen = SCREEN.LEVEL_COMPLETE;
-  sfxWin();
-  addConfetti(W / 2, H * 0.35, 40);
+  if (state.movesLeft <= 0) { if (state.score >= state.levelData.stars[0]) { await showWin(); } else { state.screen = SCREEN.LEVEL_FAILED; sfxLose(); } return; }
+  if (!hasValidMoves()) { shuffleBoard(); addFloatingText(W / 2, H / 2, 'SHUFFLE!', '#ffb347', Math.floor(cellSize * 0.6)); if (!hasValidMoves()) shuffleBoard(); }
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1521,560 +862,341 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // SECTION 7: LEVEL DEFINITIONS
 // ═══════════════════════════════════════════════════════
 
-function placeRandomBlockers(blockers, type, count) {
-  let placed = 0, attempts = 0;
-  while (placed < count && attempts < 300) {
-    const r = 1 + Math.floor(Math.random() * (ROWS - 2));
-    const c = 1 + Math.floor(Math.random() * (COLS - 2));
-    if (blockers[r][c] === BLOCKER.NONE) {
-      blockers[r][c] = type;
-      placed++;
-    }
-    attempts++;
-  }
-}
+function placeRandomBlockers(b, type, count) { let p = 0, a = 0; while (p < count && a < 300) { const r = 1 + Math.floor(Math.random() * (ROWS - 2)), c = 1 + Math.floor(Math.random() * (COLS - 2)); if (b[r][c] === BLOCKER.NONE) { b[r][c] = type; p++; } a++; } }
 
 function generateLevels() {
   const levels = [];
-
   for (let i = 1; i <= 30; i++) {
     const tier = i <= 10 ? 'easy' : i <= 20 ? 'medium' : 'hard';
-    let totalMoves;
-    if (tier === 'easy') totalMoves = 40 - Math.floor(i * 0.7);
-    else if (tier === 'medium') totalMoves = 30 - Math.floor((i - 10) * 0.5);
-    else totalMoves = 25 - Math.floor((i - 20) * 0.4);
-    totalMoves = Math.max(totalMoves, 15);
-
-    const baseScore = 400 + i * 250;
-    const stars = [
-      baseScore,
-      Math.floor(baseScore * 1.7),
-      Math.floor(baseScore * 2.6),
-    ];
-
-    const blockers = Array.from({ length: ROWS }, () => Array(COLS).fill(BLOCKER.NONE));
-
-    if (i >= 8 && i <= 10) {
-      placeRandomBlockers(blockers, BLOCKER.ICE1, 2 + Math.floor((i - 7) * 1.2));
-    } else if (i >= 11 && i <= 13) {
-      placeRandomBlockers(blockers, BLOCKER.ICE1, 3 + Math.floor((i - 10) * 0.8));
-      placeRandomBlockers(blockers, BLOCKER.ICE2, 1 + Math.floor((i - 10) * 0.7));
-    } else if (i >= 14 && i <= 19) {
-      placeRandomBlockers(blockers, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 13) * 0.7));
-      placeRandomBlockers(blockers, BLOCKER.ICE1, 2 + Math.floor((i - 13) * 0.5));
-    } else if (i >= 20) {
-      placeRandomBlockers(blockers, BLOCKER.STONE, 1 + Math.floor((i - 19) * 0.4));
-      placeRandomBlockers(blockers, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 19) * 0.5));
-      placeRandomBlockers(blockers, BLOCKER.ICE2, 2 + Math.floor((i - 19) * 0.4));
-    }
-
-    levels.push({ level: i, moves: totalMoves, stars, blockers });
+    let m; if (tier === 'easy') m = 40 - Math.floor(i * 0.7); else if (tier === 'medium') m = 30 - Math.floor((i - 10) * 0.5); else m = 25 - Math.floor((i - 20) * 0.4); m = Math.max(m, 15);
+    const bs = 400 + i * 250, stars = [bs, Math.floor(bs * 1.7), Math.floor(bs * 2.6)];
+    const bl = Array.from({ length: ROWS }, () => Array(COLS).fill(BLOCKER.NONE));
+    if (i >= 8 && i <= 10) placeRandomBlockers(bl, BLOCKER.ICE1, 2 + Math.floor((i - 7) * 1.2));
+    else if (i >= 11 && i <= 13) { placeRandomBlockers(bl, BLOCKER.ICE1, 3 + Math.floor((i - 10) * 0.8)); placeRandomBlockers(bl, BLOCKER.ICE2, 1 + Math.floor((i - 10) * 0.7)); }
+    else if (i >= 14 && i <= 19) { placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 13) * 0.7)); placeRandomBlockers(bl, BLOCKER.ICE1, 2 + Math.floor((i - 13) * 0.5)); }
+    else if (i >= 20) { placeRandomBlockers(bl, BLOCKER.STONE, 1 + Math.floor((i - 19) * 0.4)); placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 19) * 0.5)); placeRandomBlockers(bl, BLOCKER.ICE2, 2 + Math.floor((i - 19) * 0.4)); }
+    levels.push({ level: i, moves: m, stars, blockers: bl });
   }
-
   return levels;
 }
-
 const ALL_LEVELS = generateLevels();
 
 // ═══════════════════════════════════════════════════════
 // SECTION 8: INPUT HANDLING
 // ═══════════════════════════════════════════════════════
 
-let pointerStartX = null, pointerStartY = null;
-
-function getClickedCell(px, py) {
-  const c = Math.floor((px - boardX) / cellSize);
-  const r = Math.floor((py - boardY) / cellSize);
-  if (r >= 0 && r < ROWS && c >= 0 && c < COLS) return { r, c };
-  return null;
-}
-
-function isSoundToggle(px, py) {
-  const hitSize = Math.max(55, cellSize);
-  return px > W - hitSize && py < hitSize * 0.8;
-}
-
-function isBackButton(px, py) {
-  return px < 80 && py < 45 && state.screen === SCREEN.PLAYING && !state.animating;
-}
+let pStartX = null, pStartY = null;
+function getClickedCell(px, py) { const c = Math.floor((px - boardX) / cellSize), r = Math.floor((py - boardY) / cellSize); return (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? { r, c } : null; }
+function isSoundToggle(px, py) { const hs = Math.max(55, cellSize); return px > W - hs && py < hs * 0.8; }
+function isBackButton(px, py) { return px < 80 && py < 45 && (state.screen === SCREEN.PLAYING || state.screen === SCREEN.LEADERBOARD) && !state.animating; }
 
 function handleBoardClick(px, py) {
   if (state.animating || state.screen !== SCREEN.PLAYING) return;
-  const cell = getClickedCell(px, py);
-  if (!cell || !isPlayable(cell.r, cell.c)) return;
-
+  const cell = getClickedCell(px, py); if (!cell || !isPlayable(cell.r, cell.c)) return;
   ensureAudio();
-
-  if (!state.selected) {
-    state.selected = cell;
-    sfxClick();
-    return;
-  }
-
-  if (state.selected.r === cell.r && state.selected.c === cell.c) {
-    state.selected = null;
-    return;
-  }
-
-  const dr = Math.abs(state.selected.r - cell.r);
-  const dc = Math.abs(state.selected.c - cell.c);
-  if ((dr === 1 && dc === 0) || (dr === 0 && dc === 1)) {
-    trySwap(cell.r, cell.c);
-  } else {
-    state.selected = cell;
-    sfxClick();
-  }
+  if (!state.selected) { state.selected = cell; sfxClick(); return; }
+  if (state.selected.r === cell.r && state.selected.c === cell.c) { state.selected = null; return; }
+  const dr = Math.abs(state.selected.r - cell.r), dc = Math.abs(state.selected.c - cell.c);
+  if ((dr === 1 && dc === 0) || (dr === 0 && dc === 1)) trySwap(cell.r, cell.c);
+  else { state.selected = cell; sfxClick(); }
 }
 
-function handleSwipe(startX, startY, endX, endY) {
+function handleSwipe(sx, sy, ex, ey) {
   if (state.animating || state.screen !== SCREEN.PLAYING) return;
-  const cell = getClickedCell(startX, startY);
-  if (!cell) return;
-
-  const dx = endX - startX;
-  const dy = endY - startY;
-  if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
-    handleBoardClick(startX, startY);
-    return;
-  }
-
+  const cell = getClickedCell(sx, sy); if (!cell) return;
+  const dx = ex - sx, dy = ey - sy;
+  if (Math.abs(dx) < 12 && Math.abs(dy) < 12) { handleBoardClick(sx, sy); return; }
   if (!isPlayable(cell.r, cell.c)) return;
-
   let tr, tc;
-  if (Math.abs(dx) > Math.abs(dy)) {
-    tr = cell.r;
-    tc = cell.c + (dx > 0 ? 1 : -1);
-  } else {
-    tr = cell.r + (dy > 0 ? 1 : -1);
-    tc = cell.c;
-  }
-
-  if (tr >= 0 && tr < ROWS && tc >= 0 && tc < COLS && isPlayable(tr, tc)) {
-    state.selected = cell;
-    ensureAudio();
-    trySwap(tr, tc);
-  }
+  if (Math.abs(dx) > Math.abs(dy)) { tr = cell.r; tc = cell.c + (dx > 0 ? 1 : -1); } else { tr = cell.r + (dy > 0 ? 1 : -1); tc = cell.c; }
+  if (tr >= 0 && tr < ROWS && tc >= 0 && tc < COLS && isPlayable(tr, tc)) { state.selected = cell; ensureAudio(); trySwap(tr, tc); }
 }
 
-// Level select button dimensions (shared between draw and click)
 function getLevelSelectLayout() {
-  const gridCols = 5;
-  const maxBtnSize = Math.min((W - 80) / gridCols - 10, 64);
-  const btnSize = Math.max(maxBtnSize, 36);
-  const gapX = Math.max(6, Math.floor((W - gridCols * btnSize - 40) / (gridCols - 1)));
-  const gapY = Math.max(12, Math.floor(btnSize * 0.3));
-  const totalW = gridCols * btnSize + (gridCols - 1) * gapX;
-  const startX = (W - totalW) / 2;
-  const startY = H * 0.2;
-  return { gridCols, btnSize, gapX, gapY, startX, startY };
+  const gc = 5, bs = Math.max(Math.min((W - 80) / gc - 10, 64), 36);
+  const gx = Math.max(6, Math.floor((W - gc * bs - 40) / (gc - 1))), gy = Math.max(12, Math.floor(bs * 0.3));
+  const tw = gc * bs + (gc - 1) * gx;
+  return { gc, bs, gx, gy, sx: (W - tw) / 2, sy: H * 0.22 };
 }
 
 function handleLevelSelectClick(px, py) {
-  const { gridCols, btnSize, gapX, gapY, startX, startY } = getLevelSelectLayout();
-
+  const { gc, bs, gx, gy, sx, sy } = getLevelSelectLayout();
+  // Leaderboard button
+  const lbY = sy + Math.ceil(30 / gc) * (bs + gy) + 20;
+  const lbW = 160, lbH = 44, lbX = (W - lbW) / 2;
+  if (px >= lbX && px <= lbX + lbW && py >= lbY && py <= lbY + lbH) {
+    ensureAudio(); sfxClick();
+    state.screen = SCREEN.LEADERBOARD; state.leaderboardLoading = true;
+    firebase.loadLeaderboard().then(lb => { state.leaderboard = lb; state.leaderboardLoading = false; });
+    return;
+  }
+  // Sign out button
+  if (firebase.user) {
+    const soY = lbY + lbH + 12;
+    if (px >= lbX && px <= lbX + lbW && py >= soY && py <= soY + lbH) { ensureAudio(); sfxClick(); firebase.signOutUser(); state.screen = SCREEN.TITLE; return; }
+  }
   for (let i = 0; i < 30; i++) {
-    const row = Math.floor(i / gridCols);
-    const col = i % gridCols;
-    const bx = startX + col * (btnSize + gapX);
-    const by = startY + row * (btnSize + gapY);
-
-    if (px >= bx && px <= bx + btnSize && py >= by && py <= by + btnSize) {
-      const levelNum = i + 1;
-      const unlocked = levelNum === 1 || (state.progress[levelNum - 1] && state.progress[levelNum - 1] >= 1);
-      if (unlocked) {
-        ensureAudio();
-        startLevel(levelNum);
-        sfxClick();
-      }
-      return;
+    const row = Math.floor(i / gc), col = i % gc;
+    const bx = sx + col * (bs + gx), by = sy + row * (bs + gy);
+    if (px >= bx && px <= bx + bs && py >= by && py <= by + bs) {
+      const ln = i + 1, unlocked = ln === 1 || (state.progress[ln - 1] && state.progress[ln - 1] >= 1);
+      if (unlocked) { ensureAudio(); startLevel(ln); sfxClick(); } return;
     }
   }
 }
 
 function handleOverlayClick(px, py) {
-  const btnW = 180, btnH = 50;
-  const btnX = (W - btnW) / 2;
-
+  const bw = 180, bh = 50, bx = (W - bw) / 2;
   if (state.screen === SCREEN.LEVEL_COMPLETE) {
-    const btnY1 = H * 0.58;
-    if (px >= btnX && px <= btnX + btnW && py >= btnY1 && py <= btnY1 + btnH) {
-      ensureAudio();
-      sfxClick();
-      if (state.level < 30) startLevel(state.level + 1);
-      else state.screen = SCREEN.LEVEL_SELECT;
-      return;
-    }
-    const btnY2 = btnY1 + btnH + 14;
-    if (px >= btnX && px <= btnX + btnW && py >= btnY2 && py <= btnY2 + btnH) {
-      ensureAudio();
-      sfxClick();
-      state.screen = SCREEN.LEVEL_SELECT;
-      return;
-    }
+    const by1 = H * 0.58;
+    if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); if (state.level < 30) startLevel(state.level + 1); else state.screen = SCREEN.LEVEL_SELECT; return; }
+    if (px >= bx && px <= bx + bw && py >= by1 + bh + 14 && py <= by1 + bh * 2 + 14) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
   } else if (state.screen === SCREEN.LEVEL_FAILED) {
-    const btnY1 = H * 0.55;
-    if (px >= btnX && px <= btnX + btnW && py >= btnY1 && py <= btnY1 + btnH) {
-      ensureAudio();
-      sfxClick();
-      startLevel(state.level);
-      return;
-    }
-    const btnY2 = btnY1 + btnH + 14;
-    if (px >= btnX && px <= btnX + btnW && py >= btnY2 && py <= btnY2 + btnH) {
-      ensureAudio();
-      sfxClick();
-      state.screen = SCREEN.LEVEL_SELECT;
-      return;
-    }
+    const by1 = H * 0.55;
+    if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); startLevel(state.level); return; }
+    if (px >= bx && px <= bx + bw && py >= by1 + bh + 14 && py <= by1 + bh * 2 + 14) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
   }
+}
+
+function handleTitleClick(px, py) {
+  const bw = 220, bh = 54, bx = (W - bw) / 2;
+  // Sign in with Google
+  const by1 = H * 0.52;
+  if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); firebase.signIn(); return; }
+  // Play as Guest
+  const by2 = by1 + bh + 16;
+  if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
 }
 
 function onPointerDown(e) {
-  e.preventDefault();
-  const px = e.clientX, py = e.clientY;
-
-  if (isSoundToggle(px, py)) {
-    ensureAudio();
-    soundEnabled = !soundEnabled;
-    sfxClick();
-    return;
-  }
-
-  if (isBackButton(px, py)) {
-    ensureAudio();
-    sfxClick();
-    state.screen = SCREEN.LEVEL_SELECT;
-    state.animating = false;
-    return;
-  }
-
-  if (state.screen === SCREEN.LEVEL_SELECT) {
-    handleLevelSelectClick(px, py);
-    return;
-  }
-
-  if (state.screen === SCREEN.LEVEL_COMPLETE || state.screen === SCREEN.LEVEL_FAILED) {
-    handleOverlayClick(px, py);
-    return;
-  }
-
-  pointerStartX = px;
-  pointerStartY = py;
+  e.preventDefault(); const px = e.clientX, py = e.clientY;
+  if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; sfxClick(); return; }
+  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; return; }
+  if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
+  if (state.screen === SCREEN.LEVEL_SELECT) { handleLevelSelectClick(px, py); return; }
+  if (state.screen === SCREEN.LEADERBOARD) return;
+  if (state.screen === SCREEN.LEVEL_COMPLETE || state.screen === SCREEN.LEVEL_FAILED) { handleOverlayClick(px, py); return; }
+  pStartX = px; pStartY = py;
 }
 
 function onPointerUp(e) {
-  e.preventDefault();
-  if (pointerStartX === null) return;
-  const px = e.clientX, py = e.clientY;
-
-  if (state.screen === SCREEN.PLAYING) {
-    handleSwipe(pointerStartX, pointerStartY, px, py);
-  }
-
-  pointerStartX = null;
-  pointerStartY = null;
+  e.preventDefault(); if (pStartX === null) return;
+  if (state.screen === SCREEN.PLAYING) handleSwipe(pStartX, pStartY, e.clientX, e.clientY);
+  pStartX = pStartY = null;
 }
 
 canvas.addEventListener('pointerdown', onPointerDown);
 canvas.addEventListener('pointerup', onPointerUp);
-canvas.addEventListener('pointermove', (e) => e.preventDefault());
+canvas.addEventListener('pointermove', e => e.preventDefault());
 
 // ═══════════════════════════════════════════════════════
 // SECTION 9: UI SCREENS
 // ═══════════════════════════════════════════════════════
 
-function drawLevelSelectBgCandies() {
+function drawTitleBgCandies() {
   const now = performance.now() * 0.001;
-  ctx.globalAlpha = 0.06;
-  for (let i = 0; i < 12; i++) {
-    const x = ((i * 137.5 + now * 15) % (W + 100)) - 50;
-    const y = ((i * 89.3 + now * (8 + i * 2)) % (H + 100)) - 50;
-    const type = i % CANDY_TYPES;
-    drawCandyShape(x, y, cellSize * 0.35, type);
-    ctx.fillStyle = COLORS[type].main;
-    ctx.fill();
+  ctx.globalAlpha = 0.07;
+  for (let i = 0; i < 15; i++) {
+    const x = ((i * 137.5 + now * 12) % (W + 100)) - 50;
+    const y = ((i * 89.3 + now * (6 + i * 1.5)) % (H + 100)) - 50;
+    drawCandyShape(x, y, cellSize * 0.4, i % CANDY_TYPES); ctx.fillStyle = COLORS[i % CANDY_TYPES].main; ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
 
+function drawBtn(text, x, y, w, h, primary) {
+  if (primary) { const g = ctx.createLinearGradient(x, y, x + w, y + h); g.addColorStop(0, '#ff6bca'); g.addColorStop(1, '#ff9a56'); ctx.fillStyle = g; }
+  else ctx.fillStyle = 'rgba(255,255,255,0.1)';
+  drawRoundedRect(x, y, w, h, h / 2); ctx.fill();
+  if (!primary) { ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1; drawRoundedRect(x, y, w, h, h / 2); ctx.stroke(); }
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(h * 0.38)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x + w / 2, y + h / 2);
+}
+
+function drawTitleScreen() {
+  drawTitleBgCandies();
+  const tg = ctx.createLinearGradient(W / 2 - 130, 0, W / 2 + 130, 0);
+  tg.addColorStop(0, '#ff6bca'); tg.addColorStop(0.5, '#ffb347'); tg.addColorStop(1, '#ff6bca');
+  ctx.fillStyle = tg; ctx.font = `bold ${Math.floor(cellSize * 0.9)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('Sweet Match', W / 2, H * 0.28);
+
+  ctx.fillStyle = '#ccc'; ctx.font = `${Math.floor(cellSize * 0.33)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText('Match-3 Puzzle Game', W / 2, H * 0.38);
+
+  const bw = 220, bh = 54, bx = (W - bw) / 2;
+  drawBtn('Sign in with Google', bx, H * 0.52, bw, bh, true);
+  drawBtn('Play as Guest', bx, H * 0.52 + bh + 16, bw, bh, false);
+
+  if (!firebase.ready) { ctx.fillStyle = '#888'; ctx.font = `${Math.floor(cellSize * 0.25)}px sans-serif`; ctx.fillText('Connecting...', W / 2, H * 0.82); }
+}
+
 function drawLevelSelect() {
-  drawLevelSelectBgCandies();
+  drawTitleBgCandies();
+  const tg = ctx.createLinearGradient(W / 2 - 120, 0, W / 2 + 120, 0);
+  tg.addColorStop(0, '#ff6bca'); tg.addColorStop(0.5, '#ffb347'); tg.addColorStop(1, '#ff6bca');
+  ctx.fillStyle = tg; ctx.font = `bold ${Math.floor(cellSize * 0.6)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('Sweet Match', W / 2, H * 0.07);
 
-  // Title
-  const titleGrad = ctx.createLinearGradient(W / 2 - 120, 0, W / 2 + 120, 0);
-  titleGrad.addColorStop(0, '#ff6bca');
-  titleGrad.addColorStop(0.5, '#ffb347');
-  titleGrad.addColorStop(1, '#ff6bca');
-  ctx.fillStyle = titleGrad;
-  ctx.font = `bold ${Math.floor(cellSize * 0.7)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('Sweet Match', W / 2, H * 0.08);
+  // User info
+  ctx.fillStyle = '#aaa'; ctx.font = `${Math.floor(cellSize * 0.28)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(firebase.user ? firebase.user.displayName || 'Player' : 'Guest', W / 2, H * 0.13);
 
-  ctx.font = `${Math.floor(cellSize * 0.32)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillStyle = '#aaa';
-  ctx.fillText('Select a Level', W / 2, H * 0.14);
-
-  // Level grid
-  const { gridCols, btnSize, gapX, gapY, startX, startY } = getLevelSelectLayout();
-
+  const { gc, bs, gx, gy, sx, sy } = getLevelSelectLayout();
   for (let i = 0; i < 30; i++) {
-    const row = Math.floor(i / gridCols);
-    const col = i % gridCols;
-    const bx = startX + col * (btnSize + gapX);
-    const by = startY + row * (btnSize + gapY);
-    const levelNum = i + 1;
-    const starsEarned = state.progress[levelNum] || 0;
-    const unlocked = levelNum === 1 || (state.progress[levelNum - 1] && state.progress[levelNum - 1] >= 1);
-
-    // Button
-    if (unlocked) {
-      const tier = levelNum <= 10 ? 0 : levelNum <= 20 ? 1 : 2;
-      const tierGrads = [
-        ['#2ed573', '#009432'],
-        ['#ffa502', '#cc7700'],
-        ['#ff4757', '#c44569'],
-      ];
-      const btnGrad = ctx.createLinearGradient(bx, by, bx + btnSize, by + btnSize);
-      btnGrad.addColorStop(0, tierGrads[tier][0]);
-      btnGrad.addColorStop(1, tierGrads[tier][1]);
-      ctx.fillStyle = btnGrad;
-    } else {
-      ctx.fillStyle = 'rgba(255,255,255,0.08)';
-    }
-    drawRoundedRect(bx, by, btnSize, btnSize, 10);
-    ctx.fill();
+    const row = Math.floor(i / gc), col = i % gc, bx = sx + col * (bs + gx), by = sy + row * (bs + gy);
+    const ln = i + 1, se = state.progress[ln] || 0, unlocked = ln === 1 || (state.progress[ln - 1] && state.progress[ln - 1] >= 1);
 
     if (unlocked) {
-      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-      ctx.lineWidth = 1;
-      drawRoundedRect(bx, by, btnSize, btnSize, 10);
-      ctx.stroke();
-    }
+      const tier = ln <= 10 ? 0 : ln <= 20 ? 1 : 2;
+      const tc = [['#2ed573', '#009432'], ['#ffa502', '#cc7700'], ['#ff4757', '#c44569']];
+      const bg = ctx.createLinearGradient(bx, by, bx + bs, by + bs); bg.addColorStop(0, tc[tier][0]); bg.addColorStop(1, tc[tier][1]); ctx.fillStyle = bg;
+    } else ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    drawRoundedRect(bx, by, bs, bs, 10); ctx.fill();
+    if (unlocked) { ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; drawRoundedRect(bx, by, bs, bs, 10); ctx.stroke(); }
 
-    // Level number or lock
-    ctx.fillStyle = unlocked ? '#fff' : '#555';
-    ctx.font = `bold ${Math.floor(btnSize * 0.38)}px 'Segoe UI', system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    if (unlocked) {
-      ctx.fillText(levelNum, bx + btnSize / 2, by + btnSize / 2);
-    } else {
-      ctx.font = `${Math.floor(btnSize * 0.35)}px sans-serif`;
-      ctx.fillText('🔒', bx + btnSize / 2, by + btnSize / 2);
-    }
+    ctx.fillStyle = unlocked ? '#fff' : '#555'; ctx.font = `bold ${Math.floor(bs * 0.38)}px 'Segoe UI', system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(unlocked ? ln : '🔒', bx + bs / 2, by + bs / 2);
 
-    // Stars below button
-    if (starsEarned > 0) {
-      ctx.font = `${Math.floor(btnSize * 0.22)}px sans-serif`;
-      ctx.textBaseline = 'top';
-      let starDisplay = '';
-      for (let s = 0; s < 3; s++) {
-        starDisplay += s < starsEarned ? '★' : '☆';
-      }
-      ctx.fillStyle = '#ffa502';
-      ctx.fillText(starDisplay, bx + btnSize / 2, by + btnSize + 2);
-    }
+    if (se > 0) { ctx.font = `${Math.floor(bs * 0.22)}px sans-serif`; ctx.textBaseline = 'top'; ctx.fillStyle = '#ffa502'; ctx.fillText('★'.repeat(se) + '☆'.repeat(3 - se), bx + bs / 2, by + bs + 2); }
+  }
+
+  // Leaderboard button
+  const lbY = sy + Math.ceil(30 / gc) * (bs + gy) + 20;
+  const lbW = 160, lbH = 44, lbX = (W - lbW) / 2;
+  drawBtn('Leaderboard', lbX, lbY, lbW, lbH, false);
+
+  // Sign out button
+  if (firebase.user) {
+    drawBtn('Sign Out', lbX, lbY + lbH + 12, lbW, lbH, false);
   }
 }
 
-function drawOverlayButton(text, x, y, w, h, primary) {
-  if (primary) {
-    const btnGrad = ctx.createLinearGradient(x, y, x + w, y + h);
-    btnGrad.addColorStop(0, '#ff6bca');
-    btnGrad.addColorStop(1, '#ff9a56');
-    ctx.fillStyle = btnGrad;
-  } else {
-    ctx.fillStyle = 'rgba(255,255,255,0.1)';
-  }
-  drawRoundedRect(x, y, w, h, h / 2);
-  ctx.fill();
+function drawLeaderboard() {
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('Leaderboard', W / 2, H * 0.08);
 
-  if (!primary) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-    ctx.lineWidth = 1;
-    drawRoundedRect(x, y, w, h, h / 2);
-    ctx.stroke();
+  // Back
+  ctx.font = `${Math.floor(cellSize * 0.35)}px sans-serif`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText('← Back', 12, 12);
+
+  if (state.leaderboardLoading) {
+    ctx.fillStyle = '#888'; ctx.font = `${Math.floor(cellSize * 0.3)}px sans-serif`; ctx.textAlign = 'center';
+    ctx.fillText('Loading...', W / 2, H * 0.4); return;
   }
 
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold ${Math.floor(h * 0.38)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, x + w / 2, y + h / 2);
+  if (!state.leaderboard.length) {
+    ctx.fillStyle = '#888'; ctx.font = `${Math.floor(cellSize * 0.3)}px sans-serif`; ctx.textAlign = 'center';
+    ctx.fillText('No entries yet. Be the first!', W / 2, H * 0.4); return;
+  }
+
+  const startY = H * 0.15, rowH = Math.floor(cellSize * 0.65);
+  // Header
+  ctx.font = `bold ${Math.floor(cellSize * 0.28)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textBaseline = 'middle'; ctx.fillStyle = '#888';
+  ctx.textAlign = 'left'; ctx.fillText('#', W * 0.08, startY);
+  ctx.fillText('Player', W * 0.15, startY);
+  ctx.textAlign = 'right'; ctx.fillText('Stars', W * 0.75, startY);
+  ctx.fillText('Level', W * 0.92, startY);
+
+  for (let i = 0; i < state.leaderboard.length; i++) {
+    const e = state.leaderboard[i], y = startY + (i + 1) * rowH;
+    const isMe = firebase.user && e.uid === firebase.user.uid;
+
+    if (isMe) { ctx.fillStyle = 'rgba(255,107,202,0.15)'; drawRoundedRect(W * 0.05, y - rowH * 0.4, W * 0.9, rowH * 0.8, 6); ctx.fill(); }
+
+    ctx.font = `${isMe ? 'bold ' : ''}${Math.floor(cellSize * 0.28)}px 'Segoe UI', system-ui, sans-serif`;
+    ctx.fillStyle = i < 3 ? ['#ffd700', '#c0c0c0', '#cd7f32'][i] : (isMe ? '#ff6bca' : '#ccc');
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(i + 1, W * 0.08, y);
+    ctx.fillStyle = isMe ? '#ff6bca' : '#fff';
+    ctx.fillText((e.displayName || 'Player').substring(0, 18), W * 0.15, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ffa502'; ctx.fillText(e.totalStars + ' ★', W * 0.75, y);
+    ctx.fillStyle = '#aaa'; ctx.fillText('Lv.' + (e.highestLevel || 0), W * 0.92, y);
+  }
 }
 
 function drawLevelComplete() {
-  ctx.fillStyle = 'rgba(0,0,0,0.65)';
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
+  const bw = Math.min(W * 0.82, 360), bh = 280, bx = (W - bw) / 2, by = H * 0.2;
+  const g = ctx.createLinearGradient(bx, by, bx + bw, by + bh); g.addColorStop(0, '#2d1b69'); g.addColorStop(1, '#4a1a6b');
+  ctx.fillStyle = g; drawRoundedRect(bx, by, bw, bh, 20); ctx.fill();
 
-  const boxW = Math.min(W * 0.82, 360);
-  const boxH = 260;
-  const boxX = (W - boxW) / 2;
-  const boxY = H * 0.22;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#2ed573'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText('Level Complete!', W / 2, by + 48);
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.5)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(state.score.toLocaleString(), W / 2, by + 100);
+  ctx.font = `${Math.floor(cellSize * 0.65)}px sans-serif`; ctx.fillStyle = '#ffa502';
+  ctx.fillText('★'.repeat(state.stars) + '☆'.repeat(3 - state.stars), W / 2, by + 160);
 
-  const grad = ctx.createLinearGradient(boxX, boxY, boxX + boxW, boxY + boxH);
-  grad.addColorStop(0, '#2d1b69');
-  grad.addColorStop(1, '#4a1a6b');
-  ctx.fillStyle = grad;
-  drawRoundedRect(boxX, boxY, boxW, boxH, 20);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.lineWidth = 2;
-  drawRoundedRect(boxX, boxY, boxW, boxH, 20);
-  ctx.stroke();
+  // Sign in prompt for guests
+  if (!firebase.user) {
+    ctx.fillStyle = '#aaa'; ctx.font = `${Math.floor(cellSize * 0.25)}px 'Segoe UI', system-ui, sans-serif`;
+    ctx.fillText('Sign in to save progress to cloud!', W / 2, by + 200);
+  }
 
-  // Title
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#2ed573';
-  ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText('Level Complete!', W / 2, boxY + 48);
-
-  // Score
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold ${Math.floor(cellSize * 0.5)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText(state.score.toLocaleString(), W / 2, boxY + 100);
-
-  // Stars
-  ctx.font = `${Math.floor(cellSize * 0.65)}px sans-serif`;
-  let starStr = '';
-  for (let i = 0; i < 3; i++) starStr += i < state.stars ? '★' : '☆';
-  ctx.fillStyle = '#ffa502';
-  ctx.fillText(starStr, W / 2, boxY + 155);
-
-  // Buttons
-  const btnW = 180, btnH = 50;
-  const btnX = (W - btnW) / 2;
-  const btnY1 = H * 0.58;
-  drawOverlayButton(state.level < 30 ? 'Next Level' : 'All Done!', btnX, btnY1, btnW, btnH, true);
-  drawOverlayButton('Level Select', btnX, btnY1 + btnH + 14, btnW, btnH, false);
+  const btnW = 180, btnH = 50, btnX = (W - btnW) / 2, btnY1 = H * 0.58;
+  drawBtn(state.level < 30 ? 'Next Level' : 'All Done!', btnX, btnY1, btnW, btnH, true);
+  drawBtn('Level Select', btnX, btnY1 + btnH + 14, btnW, btnH, false);
 }
 
 function drawLevelFailed() {
-  ctx.fillStyle = 'rgba(0,0,0,0.65)';
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
+  const bw = Math.min(W * 0.82, 360), bh = 220, bx = (W - bw) / 2, by = H * 0.25;
+  const g = ctx.createLinearGradient(bx, by, bx + bw, by + bh); g.addColorStop(0, '#2d1b69'); g.addColorStop(1, '#4a1a6b');
+  ctx.fillStyle = g; drawRoundedRect(bx, by, bw, bh, 20); ctx.fill();
 
-  const boxW = Math.min(W * 0.82, 360);
-  const boxH = 220;
-  const boxX = (W - boxW) / 2;
-  const boxY = H * 0.25;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ff4757'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText('Out of Moves!', W / 2, by + 48);
+  ctx.fillStyle = '#ccc'; ctx.font = `${Math.floor(cellSize * 0.33)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(`Score: ${state.score.toLocaleString()}`, W / 2, by + 95);
+  ctx.fillStyle = '#888'; ctx.fillText(`Need ${state.levelData.stars[0].toLocaleString()} to pass`, W / 2, by + 130);
 
-  const grad = ctx.createLinearGradient(boxX, boxY, boxX + boxW, boxY + boxH);
-  grad.addColorStop(0, '#2d1b69');
-  grad.addColorStop(1, '#4a1a6b');
-  ctx.fillStyle = grad;
-  drawRoundedRect(boxX, boxY, boxW, boxH, 20);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.lineWidth = 2;
-  drawRoundedRect(boxX, boxY, boxW, boxH, 20);
-  ctx.stroke();
-
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ff4757';
-  ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText('Out of Moves!', W / 2, boxY + 48);
-
-  ctx.fillStyle = '#ccc';
-  ctx.font = `${Math.floor(cellSize * 0.33)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText(`Score: ${state.score.toLocaleString()}`, W / 2, boxY + 95);
-
-  const ld = state.levelData;
-  ctx.fillStyle = '#888';
-  ctx.fillText(`Need ${ld.stars[0].toLocaleString()} to pass`, W / 2, boxY + 130);
-
-  const btnW = 180, btnH = 50;
-  const btnX = (W - btnW) / 2;
-  const btnY1 = H * 0.55;
-  drawOverlayButton('Try Again', btnX, btnY1, btnW, btnH, true);
-  drawOverlayButton('Level Select', btnX, btnY1 + btnH + 14, btnW, btnH, false);
+  const btnW = 180, btnH = 50, btnX = (W - btnW) / 2, btnY1 = H * 0.55;
+  drawBtn('Try Again', btnX, btnY1, btnW, btnH, true);
+  drawBtn('Level Select', btnX, btnY1 + btnH + 14, btnW, btnH, false);
 }
 
 // ═══════════════════════════════════════════════════════
 // SECTION 10: GAME LOOP & INITIALIZATION
 // ═══════════════════════════════════════════════════════
 
-function startLevel(levelNum) {
-  const ld = ALL_LEVELS[levelNum - 1];
-  state.level = levelNum;
-  state.levelData = ld;
-  state.score = 0;
-  state.movesLeft = ld.moves;
-  state.totalMoves = ld.moves;
-  state.selected = null;
-  state.animating = false;
-  state.cascade = 0;
-  state.hintTimer = 0;
-  state.hintMove = null;
-  state.particles = [];
-  state.floatingTexts = [];
-  state.animations = [];
-  state.shakeAmount = 0;
-  state.shakeTime = 0;
-  state.stars = 0;
-  state.bonusPhase = false;
-  state.screen = SCREEN.PLAYING;
-
+function startLevel(n) {
+  const ld = ALL_LEVELS[n - 1];
+  Object.assign(state, { level: n, levelData: ld, score: 0, movesLeft: ld.moves, totalMoves: ld.moves, selected: null, animating: false, cascade: 0, hintTimer: 0, hintMove: null, particles: [], floatingTexts: [], tweens: [], shakeAmount: 0, shakeTime: 0, stars: 0, bonusPhase: false, screen: SCREEN.PLAYING });
   createBoard(ld);
-
-  let attempts = 0;
-  while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && attempts < 150) {
-    createBoard(ld);
-    attempts++;
-  }
+  let att = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att < 150) { createBoard(ld); att++; }
 }
 
 let lastTime = 0;
-
 function gameLoop(time) {
-  const dt = Math.min((time - lastTime) / 1000, 0.05);
-  lastTime = time;
+  const dt = Math.min((time - lastTime) / 1000, 0.05); lastTime = time;
+  updateTweens(dt); updateParticles(dt);
 
-  // Update
-  updateParticles(dt);
-
-  // Hint timer
   if (state.screen === SCREEN.PLAYING && !state.animating && !state.selected && !state.bonusPhase) {
     state.hintTimer += dt;
-    if (state.hintTimer > 5 && !state.hintMove) {
-      state.hintMove = hasValidMoves();
-    }
+    if (state.hintTimer > 5 && !state.hintMove) state.hintMove = hasValidMoves();
   }
 
-  // Draw
   drawBackground();
+  if (state.screen === SCREEN.TITLE) drawTitleScreen();
+  else if (state.screen === SCREEN.LEVEL_SELECT) drawLevelSelect();
+  else if (state.screen === SCREEN.LEADERBOARD) drawLeaderboard();
+  else { drawBoard(); drawHUD(); drawParticles(); drawFloatingTexts(); if (state.screen === SCREEN.LEVEL_COMPLETE) drawLevelComplete(); else if (state.screen === SCREEN.LEVEL_FAILED) drawLevelFailed(); }
 
-  if (state.screen === SCREEN.LEVEL_SELECT) {
-    drawLevelSelect();
-  } else {
-    drawBoard();
-    drawHUD();
-    drawParticles();
-    drawFloatingTexts();
-
-    if (state.screen === SCREEN.LEVEL_COMPLETE) {
-      drawLevelComplete();
-    } else if (state.screen === SCREEN.LEVEL_FAILED) {
-      drawLevelFailed();
-    }
-  }
-
-  // Sound toggle (always visible)
-  ctx.font = `${Math.floor(cellSize * 0.38)}px sans-serif`;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = '#fff';
-  ctx.fillText(soundEnabled ? '🔊' : '🔇', W - 12, 10);
-
+  // Sound toggle
+  ctx.font = `${Math.floor(cellSize * 0.38)}px sans-serif`; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#fff'; ctx.fillText(soundEnabled ? '🔊' : '🔇', W - 12, 10);
   requestAnimationFrame(gameLoop);
 }
 
-// Start
-loadProgress();
-resize();
-requestAnimationFrame(gameLoop);
+loadProgressLocal(); resize(); requestAnimationFrame(gameLoop);
 
 </script>
 </body>
