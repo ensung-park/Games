@@ -143,7 +143,17 @@ const COLORS = [
 const SPECIAL = { NONE: 0, STRIPED_H: 1, STRIPED_V: 2, WRAPPED: 3, COLOR_BOMB: 4 };
 const BLOCKER = { NONE: 0, ICE1: 1, ICE2: 2, CHOCOLATE: 3, STONE: 4 };
 const SHAPES = ['circle', 'diamond', 'square', 'triangle', 'pentagon', 'heart'];
-const SCREEN = { TITLE: -1, LEVEL_SELECT: 0, PLAYING: 1, LEVEL_COMPLETE: 2, LEVEL_FAILED: 3, LEADERBOARD: 4 };
+const SCREEN = { TITLE: -1, LEVEL_SELECT: 0, GOAL_PREVIEW: 5, PLAYING: 1, LEVEL_COMPLETE: 2, LEVEL_FAILED: 3, LEADERBOARD: 4 };
+const GOAL = { SCORE: 0, CLEAR_JELLY: 1, COLLECT: 2, DROP_INGREDIENT: 3 };
+
+// Combo celebration messages
+const COMBO_MSGS = [
+  { min: 2, text: 'Sweet!', color: '#ffb347' },
+  { min: 3, text: 'Tasty!', color: '#ff6bca' },
+  { min: 4, text: 'Divine!', color: '#a55eea' },
+  { min: 5, text: 'AMAZING!', color: '#1e90ff' },
+  { min: 7, text: 'UNREAL!', color: '#2ed573' },
+];
 
 const canvas = document.getElementById('gc');
 const ctx = canvas.getContext('2d');
@@ -194,6 +204,15 @@ const state = {
   bonusPhase: false,
   leaderboard: [],
   leaderboardLoading: false,
+  // Goal tracking
+  goalType: GOAL.SCORE,
+  goalProgress: {},    // { jellyLeft, collected: {type: count}, ingredientsDropped }
+  hammerAvailable: true,
+  hammerActive: false,
+  jellyBoard: null,    // [r][c] = 0 (none), 1 (jelly), 2 (double jelly)
+  ingredients: [],     // [{r, c}] positions of ingredient candies
+  goalPreviewTimer: 0,
+  screenFlash: 0,
 };
 
 function makeCell(type, special, blocker) {
@@ -732,7 +751,15 @@ async function processMatches() {
     state.score += pts * mult;
     sfxMatch(cascade);
 
-    if (cascade > 1) { state.shakeAmount = Math.min(cascade * 3, 12); state.shakeTime = 0; addFloatingText(W / 2, boardY - 30, cascade + 'x COMBO!', '#ff6bca', Math.floor(cellSize * 0.5)); }
+    if (cascade > 1) {
+      state.shakeAmount = Math.min(cascade * 3, 12); state.shakeTime = 0;
+      // Combo celebration with escalating messages
+      let msg = cascade + 'x COMBO!', msgColor = '#ff6bca';
+      for (const cm of COMBO_MSGS) { if (cascade >= cm.min) { msg = cm.text; msgColor = cm.color; } }
+      addFloatingText(W / 2, boardY - 30, msg, msgColor, Math.floor(cellSize * (0.5 + cascade * 0.08)));
+      // Screen flash for big combos
+      if (cascade >= 4) { state.screenFlash = 0.3; }
+    }
 
     const matchedSet = new Set(allM), specPos = new Set(specials.map(s => s.r + ',' + s.c)), extraR = new Set();
     for (const key of matchedSet) { if (specPos.has(key)) continue; const [r, c] = key.split(',').map(Number); const cell = state.board[r][c]; if (cell.special !== SPECIAL.NONE && cell.special !== SPECIAL.COLOR_BOMB) { sfxExplosion(); for (const e of getSpecialRemoval(r, c, cell.special)) extraR.add(e); addParticle(cellToScreen(r, c).x, cellToScreen(r, c).y, '#fff', 12); state.shakeAmount = Math.max(state.shakeAmount, 8); state.shakeTime = 0; } }
@@ -756,7 +783,20 @@ async function processMatches() {
 
     if (groups.length > 0) { const mg = groups[0].cells[Math.floor(groups[0].cells.length / 2)]; const p = cellToScreen(mg.r, mg.c); addFloatingText(p.x, p.y - 5, '+' + (pts * mult), cascade > 1 ? '#ffb347' : '#fff'); }
 
-    for (const key of matchedSet) { const [r, c] = key.split(',').map(Number); if (specPos.has(key)) continue; clearIceAt(r, c); if (state.board[r][c].blocker !== BLOCKER.STONE) state.board[r][c] = makeCell(EMPTY); }
+    for (const key of matchedSet) {
+      const [r, c] = key.split(',').map(Number);
+      if (specPos.has(key)) continue;
+      // Track goals
+      if (state.jellyBoard && state.jellyBoard[r][c] > 0) {
+        state.jellyBoard[r][c]--;
+        if (state.jellyBoard[r][c] <= 0 && state.goalProgress.jellyLeft > 0) state.goalProgress.jellyLeft--;
+      }
+      if (state.goalType === GOAL.COLLECT && state.board[r][c].type === state.goalProgress.collectType) {
+        state.goalProgress.collected = (state.goalProgress.collected || 0) + 1;
+      }
+      clearIceAt(r, c);
+      if (state.board[r][c].blocker !== BLOCKER.STONE) state.board[r][c] = makeCell(EMPTY);
+    }
     for (const s of specials) { state.board[s.r][s.c] = makeCell(s.type, s.special); state.board[s.r][s.c].scale = 0; sfxSpecialCreate(); addParticle(cellToScreen(s.r, s.c).x, cellToScreen(s.r, s.c).y, '#fff', 8); }
 
     // Animate special creation
@@ -861,12 +901,36 @@ async function showWin() {
   state.stars = es;
   const prev = state.progress[state.level] || 0;
   if (es > prev) { state.progress[state.level] = es; await saveProgress(); }
-  state.screen = SCREEN.LEVEL_COMPLETE; sfxWin(); addConfetti(W / 2, H * 0.35, 40);
+  state.screen = SCREEN.LEVEL_COMPLETE; sfxWin();
+  // Fireworks celebration
+  addConfetti(W / 2, H * 0.35, 50);
+  addConfetti(W * 0.3, H * 0.4, 25);
+  addConfetti(W * 0.7, H * 0.4, 25);
+  state.screenFlash = 0.4;
+}
+
+function isGoalMet() {
+  const ld = state.levelData;
+  if (ld.goal === GOAL.CLEAR_JELLY) return state.goalProgress.jellyLeft <= 0;
+  if (ld.goal === GOAL.COLLECT) return (state.goalProgress.collected || 0) >= state.goalProgress.target;
+  if (ld.goal === GOAL.DROP_INGREDIENT) return (state.goalProgress.dropped || 0) >= state.goalProgress.target;
+  return state.score >= ld.stars[0]; // SCORE goal
 }
 
 async function checkLevelEnd() {
   if (state.screen !== SCREEN.PLAYING) return;
-  if (state.movesLeft <= 0) { if (state.score >= state.levelData.stars[0]) { await showWin(); } else { state.screen = SCREEN.LEVEL_FAILED; sfxLose(); } return; }
+
+  // Check goal-based win (can win with moves remaining)
+  if (isGoalMet() && state.goalType !== GOAL.SCORE) {
+    await showWin();
+    return;
+  }
+
+  if (state.movesLeft <= 0) {
+    if (isGoalMet()) { await showWin(); }
+    else { state.screen = SCREEN.LEVEL_FAILED; sfxLose(); }
+    return;
+  }
   if (!hasValidMoves()) { shuffleBoard(); addFloatingText(W / 2, H / 2, 'SHUFFLE!', '#ffb347', Math.floor(cellSize * 0.6)); if (!hasValidMoves()) shuffleBoard(); }
 }
 
@@ -889,7 +953,29 @@ function generateLevels() {
     else if (i >= 11 && i <= 13) { placeRandomBlockers(bl, BLOCKER.ICE1, 3 + Math.floor((i - 10) * 0.8)); placeRandomBlockers(bl, BLOCKER.ICE2, 1 + Math.floor((i - 10) * 0.7)); }
     else if (i >= 14 && i <= 19) { placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 13) * 0.7)); placeRandomBlockers(bl, BLOCKER.ICE1, 2 + Math.floor((i - 13) * 0.5)); }
     else if (i >= 20) { placeRandomBlockers(bl, BLOCKER.STONE, 1 + Math.floor((i - 19) * 0.4)); placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 19) * 0.5)); placeRandomBlockers(bl, BLOCKER.ICE2, 2 + Math.floor((i - 19) * 0.4)); }
-    levels.push({ level: i, moves: m, stars, blockers: bl });
+
+    // Assign varied objectives
+    let goal = GOAL.SCORE, goalData = {};
+    if (i <= 3) {
+      goal = GOAL.SCORE; // Pure score for tutorial levels
+    } else if (i % 5 === 0) {
+      // Every 5th level: collect specific candy types
+      goal = GOAL.COLLECT;
+      const ct = Math.floor(Math.random() * CANDY_TYPES);
+      goalData = { collectType: ct, collectTarget: 15 + Math.floor(i * 1.5) };
+    } else if (i >= 6 && i % 3 === 0) {
+      // Clear jelly levels
+      goal = GOAL.CLEAR_JELLY;
+      const jellyCount = 10 + Math.floor(i * 0.8);
+      goalData = { jellyCount: Math.min(jellyCount, 30) };
+    } else if (i >= 12 && i % 4 === 1) {
+      // Drop ingredient levels
+      goal = GOAL.DROP_INGREDIENT;
+      goalData = { ingredientCount: 1 + Math.floor((i - 10) * 0.3) };
+      goalData.ingredientCount = Math.min(goalData.ingredientCount, 4);
+    }
+
+    levels.push({ level: i, moves: m, stars, blockers: bl, goal, goalData });
   }
   return levels;
 }
@@ -906,7 +992,54 @@ function isBackButton(px, py) { return px < 80 && py < 45 && (state.screen === S
 
 function handleBoardClick(px, py) {
   if (state.animating || state.screen !== SCREEN.PLAYING) return;
-  const cell = getClickedCell(px, py); if (!cell || !isPlayable(cell.r, cell.c)) return;
+
+  // Check hammer button click
+  if (state._hammerBtn) {
+    const hb = state._hammerBtn;
+    if (px >= hb.x && px <= hb.x + hb.w && py >= hb.y && py <= hb.y + hb.h) {
+      ensureAudio();
+      if (state.hammerAvailable && !state.hammerActive) { state.hammerActive = true; state.selected = null; sfxClick(); }
+      else if (state.hammerActive) { state.hammerActive = false; sfxClick(); }
+      return;
+    }
+  }
+
+  const cell = getClickedCell(px, py); if (!cell) return;
+
+  // Hammer mode: destroy any candy
+  if (state.hammerActive && state.hammerAvailable) {
+    if (isPlayable(cell.r, cell.c)) {
+      ensureAudio(); sfxExplosion();
+      const p = cellToScreen(cell.r, cell.c);
+      addParticle(p.x, p.y, COLORS[state.board[cell.r][cell.c].type % CANDY_TYPES].main, 12);
+      // Track goals
+      if (state.jellyBoard && state.jellyBoard[cell.r][cell.c] > 0) {
+        state.jellyBoard[cell.r][cell.c] = 0;
+        if (state.goalProgress.jellyLeft > 0) state.goalProgress.jellyLeft--;
+      }
+      if (state.goalType === GOAL.COLLECT && state.board[cell.r][cell.c].type === state.goalProgress.collectType) {
+        state.goalProgress.collected = (state.goalProgress.collected || 0) + 1;
+      }
+      state.board[cell.r][cell.c] = makeCell(EMPTY);
+      state.hammerAvailable = false;
+      state.hammerActive = false;
+      state.shakeAmount = 5; state.shakeTime = 0;
+      // Gravity after hammer
+      (async () => {
+        state.animating = true;
+        await sleep(100);
+        const { newTiles, fallingCells } = gravity();
+        await animateGravity(fallingCells);
+        await animateNewTiles(newTiles);
+        await processMatches();
+        state.animating = false;
+        await checkLevelEnd();
+      })();
+    }
+    return;
+  }
+
+  if (!isPlayable(cell.r, cell.c)) return;
   ensureAudio();
   if (!state.selected) { state.selected = cell; sfxClick(); return; }
   if (state.selected.r === cell.r && state.selected.c === cell.c) { state.selected = null; return; }
@@ -989,6 +1122,7 @@ function onPointerDown(e) {
   e.preventDefault(); const px = e.clientX, py = e.clientY + TOUCH_OFFSET_Y;
   if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; sfxClick(); return; }
   if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; return; }
+  if (state.screen === SCREEN.GOAL_PREVIEW) { state.screen = SCREEN.PLAYING; return; }
   if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
   if (state.screen === SCREEN.LEVEL_SELECT) { handleLevelSelectClick(px, py); return; }
   if (state.screen === SCREEN.LEADERBOARD) return;
@@ -1137,6 +1271,96 @@ function drawLeaderboard() {
   }
 }
 
+function drawJelly() {
+  if (!state.jellyBoard) return;
+  const shk = state.shakeAmount;
+  const sx = shk ? Math.sin(state.shakeTime * 40) * shk : 0;
+  const sy = shk ? Math.cos(state.shakeTime * 35) * shk * 0.7 : 0;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const j = state.jellyBoard[r][c];
+      if (j <= 0) continue;
+      const p = cellToScreen(r, c);
+      ctx.fillStyle = j === 2 ? 'rgba(255,100,180,0.3)' : 'rgba(255,100,180,0.15)';
+      drawRoundedRect(p.x - cellSize / 2 + 2 + sx, p.y - cellSize / 2 + 2 + sy, cellSize - 4, cellSize - 4, 5);
+      ctx.fill();
+    }
+  }
+}
+
+function drawHammerButton() {
+  if (state.screen !== SCREEN.PLAYING) return;
+  const bx = boardX + cellSize * COLS + 8, by = boardY;
+  const bsz = Math.floor(cellSize * 0.9);
+  // If board is too wide, put hammer below
+  const useBelow = bx + bsz > W - 10;
+  const hx = useBelow ? boardX + cellSize * COLS - bsz : bx;
+  const hy = useBelow ? boardY + cellSize * ROWS + 12 : by;
+
+  ctx.fillStyle = state.hammerActive ? 'rgba(255,180,50,0.4)' : (state.hammerAvailable ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.03)');
+  drawRoundedRect(hx, hy, bsz, bsz, 8); ctx.fill();
+  if (state.hammerActive) { ctx.strokeStyle = '#ffb347'; ctx.lineWidth = 2; drawRoundedRect(hx, hy, bsz, bsz, 8); ctx.stroke(); }
+
+  ctx.font = `${Math.floor(bsz * 0.5)}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = state.hammerAvailable ? '#fff' : '#555';
+  ctx.fillText('🔨', hx + bsz / 2, hy + bsz / 2);
+  if (!state.hammerAvailable) { ctx.fillStyle = '#ff4757'; ctx.font = `bold ${Math.floor(bsz * 0.3)}px sans-serif`; ctx.fillText('✗', hx + bsz * 0.75, hy + bsz * 0.25); }
+
+  // Store hammer button position for click detection
+  state._hammerBtn = { x: hx, y: hy, w: bsz, h: bsz };
+}
+
+function drawGoalProgress() {
+  if (state.screen !== SCREEN.PLAYING || !state.levelData) return;
+  const ld = state.levelData;
+  const y = boardY + cellSize * ROWS + 14;
+  ctx.font = `${Math.floor(cellSize * 0.28)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+
+  if (ld.goal === GOAL.CLEAR_JELLY && state.goalProgress.jellyLeft !== undefined) {
+    ctx.fillStyle = '#ff6bca'; ctx.fillText(`Jelly left: ${state.goalProgress.jellyLeft}`, W / 2, y);
+  } else if (ld.goal === GOAL.COLLECT) {
+    const gp = state.goalProgress;
+    ctx.fillStyle = COLORS[gp.collectType % CANDY_TYPES].main;
+    ctx.fillText(`Collected: ${gp.collected || 0} / ${gp.target}`, W / 2, y);
+  } else if (ld.goal === GOAL.DROP_INGREDIENT) {
+    ctx.fillStyle = '#2ed573'; ctx.fillText(`Ingredients: ${state.goalProgress.dropped || 0} / ${state.goalProgress.target}`, W / 2, y);
+  }
+}
+
+function drawGoalPreview() {
+  drawBackground();
+  const ld = state.levelData;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  // Level number
+  const tg = ctx.createLinearGradient(W / 2 - 80, 0, W / 2 + 80, 0);
+  tg.addColorStop(0, '#ff6bca'); tg.addColorStop(0.5, '#ffb347'); tg.addColorStop(1, '#ff6bca');
+  ctx.fillStyle = tg; ctx.font = `bold ${Math.floor(cellSize * 0.7)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(`Level ${state.level}`, W / 2, H * 0.25);
+
+  // Goal text
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.4)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(getGoalText(ld), W / 2, H * 0.4);
+
+  // Moves
+  ctx.fillStyle = '#aaa'; ctx.font = `${Math.floor(cellSize * 0.32)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(`${ld.moves} moves`, W / 2, H * 0.5);
+
+  // Star thresholds
+  ctx.fillStyle = '#888'; ctx.font = `${Math.floor(cellSize * 0.28)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(`★ ${ld.stars[0]}   ★★ ${ld.stars[1]}   ★★★ ${ld.stars[2]}`, W / 2, H * 0.57);
+
+  // Hammer hint
+  ctx.fillStyle = '#ffb347'; ctx.font = `${Math.floor(cellSize * 0.25)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText('🔨 Tap the hammer to destroy any candy!', W / 2, H * 0.66);
+
+  // Countdown
+  const secs = Math.ceil(state.goalPreviewTimer);
+  ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = `${Math.floor(cellSize * 0.3)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText(`Starting in ${secs}...`, W / 2, H * 0.78);
+}
+
 function drawLevelComplete() {
   ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
   const bw = Math.min(W * 0.82, 360), bh = 280, bx = (W - bw) / 2, by = H * 0.2;
@@ -1186,15 +1410,70 @@ function drawLevelFailed() {
 
 function startLevel(n) {
   const ld = ALL_LEVELS[n - 1];
-  Object.assign(state, { level: n, levelData: ld, score: 0, movesLeft: ld.moves, totalMoves: ld.moves, selected: null, animating: false, cascade: 0, hintTimer: 0, hintMove: null, particles: [], floatingTexts: [], tweens: [], shakeAmount: 0, shakeTime: 0, stars: 0, bonusPhase: false, screen: SCREEN.PLAYING });
+  Object.assign(state, {
+    level: n, levelData: ld, score: 0, movesLeft: ld.moves, totalMoves: ld.moves,
+    selected: null, animating: false, cascade: 0, hintTimer: 0, hintMove: null,
+    particles: [], floatingTexts: [], tweens: [], shakeAmount: 0, shakeTime: 0,
+    stars: 0, bonusPhase: false,
+    goalType: ld.goal || GOAL.SCORE,
+    goalProgress: {},
+    hammerAvailable: true, hammerActive: false,
+    jellyBoard: null, ingredients: [],
+    goalPreviewTimer: 3.0,
+    screen: SCREEN.GOAL_PREVIEW,
+  });
+
   createBoard(ld);
   let att = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att < 150) { createBoard(ld); att++; }
+
+  // Initialize goal-specific state
+  if (ld.goal === GOAL.CLEAR_JELLY) {
+    state.jellyBoard = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+    let placed = 0;
+    const target = ld.goalData.jellyCount || 15;
+    while (placed < target) {
+      const r = Math.floor(Math.random() * ROWS), c = Math.floor(Math.random() * COLS);
+      if (state.jellyBoard[r][c] === 0 && isPlayable(r, c)) {
+        state.jellyBoard[r][c] = (placed < target / 3) ? 2 : 1; // some double jelly
+        placed++;
+      }
+      if (placed > 200) break;
+    }
+    state.goalProgress = { jellyLeft: placed };
+  } else if (ld.goal === GOAL.COLLECT) {
+    state.goalProgress = { collected: 0, target: ld.goalData.collectTarget, collectType: ld.goalData.collectType };
+  } else if (ld.goal === GOAL.DROP_INGREDIENT) {
+    state.ingredients = [];
+    const count = ld.goalData.ingredientCount || 1;
+    for (let i = 0; i < count; i++) {
+      const c = 1 + Math.floor(Math.random() * (COLS - 2));
+      state.board[0][c] = makeCell(EMPTY);
+      state.board[0][c].isIngredient = true;
+      state.board[0][c].type = Math.floor(Math.random() * CANDY_TYPES);
+      state.ingredients.push({ r: 0, c });
+    }
+    state.goalProgress = { dropped: 0, target: count };
+  }
+}
+
+function getGoalText(ld) {
+  if (!ld) return '';
+  if (ld.goal === GOAL.CLEAR_JELLY) return 'Clear all the jelly!';
+  if (ld.goal === GOAL.COLLECT) return `Collect ${ld.goalData.collectTarget} ${SHAPES[ld.goalData.collectType]} candies!`;
+  if (ld.goal === GOAL.DROP_INGREDIENT) return `Drop ${ld.goalData.ingredientCount} ingredient${ld.goalData.ingredientCount > 1 ? 's' : ''} to the bottom!`;
+  return `Score ${ld.stars[0].toLocaleString()} points!`;
 }
 
 let lastTime = 0;
 function gameLoop(time) {
   const dt = Math.min((time - lastTime) / 1000, 0.05); lastTime = time;
   updateTweens(dt); updateParticles(dt);
+
+  // Goal preview countdown
+  if (state.screen === SCREEN.GOAL_PREVIEW) {
+    state.goalPreviewTimer -= dt;
+    if (state.goalPreviewTimer <= 0) state.screen = SCREEN.PLAYING;
+  }
 
   if (state.screen === SCREEN.PLAYING && !state.animating && !state.selected && !state.bonusPhase) {
     state.hintTimer += dt;
@@ -1205,7 +1484,33 @@ function gameLoop(time) {
   if (state.screen === SCREEN.TITLE) drawTitleScreen();
   else if (state.screen === SCREEN.LEVEL_SELECT) drawLevelSelect();
   else if (state.screen === SCREEN.LEADERBOARD) drawLeaderboard();
-  else { drawBoard(); drawHUD(); drawParticles(); drawFloatingTexts(); if (state.screen === SCREEN.LEVEL_COMPLETE) drawLevelComplete(); else if (state.screen === SCREEN.LEVEL_FAILED) drawLevelFailed(); }
+  else if (state.screen === SCREEN.GOAL_PREVIEW) drawGoalPreview();
+  else {
+    drawBoard(); drawHUD(); drawParticles(); drawFloatingTexts();
+    // Draw jelly under board
+    if (state.jellyBoard) drawJelly();
+    // Draw hammer button
+    drawHammerButton();
+    // Draw goal progress
+    drawGoalProgress();
+    if (state.screen === SCREEN.LEVEL_COMPLETE) drawLevelComplete();
+    else if (state.screen === SCREEN.LEVEL_FAILED) drawLevelFailed();
+  }
+
+  // Screen flash effect
+  if (state.screenFlash > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${state.screenFlash})`;
+    ctx.fillRect(0, 0, W, H);
+    state.screenFlash -= dt * 2;
+    if (state.screenFlash < 0) state.screenFlash = 0;
+  }
+
+  // Moves counter pulse when low
+  if (state.screen === SCREEN.PLAYING && state.movesLeft <= 3 && state.movesLeft > 0 && !state.animating) {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.01);
+    ctx.fillStyle = `rgba(255,71,87,${pulse * 0.15})`;
+    ctx.fillRect(0, 0, W, boardY);
+  }
 
   // Sound toggle
   ctx.font = `${Math.floor(cellSize * 0.38)}px sans-serif`; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
