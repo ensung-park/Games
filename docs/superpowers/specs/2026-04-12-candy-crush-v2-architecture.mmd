@@ -1,0 +1,47 @@
+%% Candy Crush v2 - Full Architecture Diagram
+%% Render with: https://mermaid.live or any Mermaid-compatible viewer
+
+graph TB
+    subgraph "User's Browser"
+        direction TB
+        TITLE["Title Screen<br/>Sign In / Guest"]
+        LS["Level Select<br/>+ Leaderboard"]
+        GAME["Game Canvas<br/>Match-3 Gameplay"]
+        ANIM["Animation Engine<br/>Tweened Transitions"]
+        AUDIO["Audio Engine<br/>Web Audio API"]
+
+        TITLE --> LS
+        LS --> GAME
+        GAME --> ANIM
+        GAME --> AUDIO
+    end
+
+    subgraph "Firebase Services"
+        direction TB
+        GAUTH["Google OAuth 2.0<br/>Authentication"]
+        FSTORE["Cloud Firestore<br/>NoSQL Database"]
+        RULES["Security Rules<br/>User-scoped access"]
+
+        GAUTH --> FSTORE
+        FSTORE --> RULES
+    end
+
+    subgraph "GitHub Pages"
+        STATIC["Static Hosting<br/>ensung-park.github.io/Games"]
+    end
+
+    STATIC -->|"serves"| TITLE
+    TITLE -->|"signInWithPopup"| GAUTH
+    GAUTH -->|"uid, name, photo"| LS
+    LS -->|"getDoc(users/uid)"| FSTORE
+    GAME -->|"updateDoc(users/uid)"| FSTORE
+    GAME -->|"updateDoc(leaderboard/uid)"| FSTORE
+    LS -->|"query(leaderboard, orderBy totalStars)"| FSTORE
+
+    classDef firebase fill:#ff9800,color:#fff,stroke:#e65100
+    classDef pages fill:#2196f3,color:#fff,stroke:#1565c0
+    classDef browser fill:#4caf50,color:#fff,stroke:#2e7d32
+
+    class GAUTH,FSTORE,RULES firebase
+    class STATIC pages
+    class TITLE,LS,GAME,ANIM,AUDIO browser
