@@ -629,7 +629,7 @@ function handleSpecialCombo(r1, c1, r2, c2) {
 function swap(r1, c1, r2, c2) { const t = state.board[r1][c1]; state.board[r1][c1] = state.board[r2][c2]; state.board[r2][c2] = t; }
 
 function gravity() {
-  const newTiles = [];
+  const newTiles = [], fallingCells = [];
   for (let c = 0; c < COLS; c++) {
     const bRows = new Set();
     for (let r = 0; r < ROWS; r++) { const cell = state.board[r][c]; if (cell.blocker === BLOCKER.STONE || cell.blocker === BLOCKER.CHOCOLATE) bRows.add(r); }
@@ -638,12 +638,50 @@ function gravity() {
       if (bRows.has(se)) { se--; continue; }
       let ss = se; while (ss > 0 && !bRows.has(ss - 1)) ss--;
       let wp = se;
-      for (let r = se; r >= ss; r--) { if (state.board[r][c].type >= 0) { if (r !== wp) { state.board[wp][c] = state.board[r][c]; state.board[r][c] = makeCell(EMPTY); } wp--; } }
-      for (let r = wp; r >= ss; r--) { if (state.board[r][c].type === EMPTY && state.board[r][c].blocker === BLOCKER.NONE) { state.board[r][c] = makeCell(randomCandy()); state.board[r][c].scale = 0; newTiles.push({ r, c }); } }
+      for (let r = se; r >= ss; r--) {
+        if (state.board[r][c].type >= 0) {
+          if (r !== wp) {
+            const cell = state.board[r][c];
+            const oldY = cellToScreen(r, c).y;
+            state.board[wp][c] = cell;
+            state.board[r][c] = makeCell(EMPTY);
+            // Set drawY to old position for fall animation
+            cell.drawY = oldY;
+            fallingCells.push({ r: wp, c, cell });
+          }
+          wp--;
+        }
+      }
+      for (let r = wp; r >= ss; r--) {
+        if (state.board[r][c].type === EMPTY && state.board[r][c].blocker === BLOCKER.NONE) {
+          const cell = makeCell(randomCandy());
+          cell.scale = 0;
+          // Start new tiles above the board for drop-in effect
+          cell.drawY = cellToScreen(ss - 1, c).y - cellSize;
+          state.board[r][c] = cell;
+          newTiles.push({ r, c });
+          fallingCells.push({ r, c, cell });
+        }
+      }
       se = ss - 1;
     }
   }
-  return newTiles;
+  return { newTiles, fallingCells };
+}
+
+async function animateGravity(fallingCells) {
+  const promises = [];
+  for (const { r, c, cell } of fallingCells) {
+    if (cell.drawY !== undefined) {
+      const targetY = cellToScreen(r, c).y;
+      const dist = Math.abs(targetY - cell.drawY);
+      const dur = Math.min(0.08 + dist / (cellSize * 12), 0.35);
+      promises.push(tween(cell, { drawY: targetY }, dur, 'bounce'));
+    }
+  }
+  if (promises.length) await Promise.all(promises);
+  // Clean up drawY
+  for (const { cell } of fallingCells) delete cell.drawY;
 }
 
 function spreadChocolate() {
@@ -726,11 +764,11 @@ async function processMatches() {
     for (const s of specials) specTweens.push(tween(state.board[s.r][s.c], { scale: 1 }, 0.3, 'bounce'));
     if (specTweens.length) await Promise.all(specTweens);
 
-    await sleep(80);
-    const newTiles = gravity();
-    await sleep(80);
+    await sleep(50);
+    const { newTiles, fallingCells } = gravity();
+    await animateGravity(fallingCells);
     await animateNewTiles(newTiles);
-    await sleep(80);
+    await sleep(50);
   }
   if (!clearedChoc) spreadChocolate();
   state.cascade = 0;
@@ -750,7 +788,7 @@ async function endOfLevelBonus() {
     for (const key of rm) { const [rr, cc] = key.split(',').map(Number); if (state.board[rr][cc].type >= 0 && state.board[rr][cc].blocker !== BLOCKER.STONE) { addParticle(cellToScreen(rr, cc).x, cellToScreen(rr, cc).y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 4); state.board[rr][cc] = makeCell(EMPTY); } }
     const bp = 50 + rm.size * 10; state.score += bp; state.movesLeft--;
     addFloatingText(cellToScreen(t.r, t.c).x, cellToScreen(t.r, t.c).y, '+' + bp, '#ffb347');
-    await sleep(150); gravity(); await sleep(100);
+    await sleep(100); const { fallingCells: fc } = gravity(); await animateGravity(fc); await sleep(50);
   }
   state.bonusPhase = false;
 }
@@ -778,7 +816,7 @@ async function trySwap(r, c) {
     sfxExplosion(); state.shakeAmount = 12; state.shakeTime = 0;
     for (const key of combo) { const [rr, cc] = key.split(',').map(Number); if (state.board[rr][cc].blocker === BLOCKER.STONE) continue; clearIceAt(rr, cc); const p = cellToScreen(rr, cc); if (state.board[rr][cc].type >= 0) addParticle(p.x, p.y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 6); else if (state.board[rr][cc].blocker === BLOCKER.CHOCOLATE) addParticle(p.x, p.y, '#7b4a2b', 6); state.board[rr][cc] = makeCell(EMPTY); }
     state.score += combo.size * 30; addFloatingText(W / 2, H / 2, '+' + (combo.size * 30), '#ff6bca', Math.floor(cellSize * 0.6));
-    await sleep(200); const nt = gravity(); await sleep(100); await animateNewTiles(nt); await processMatches();
+    await sleep(150); const { newTiles: nt, fallingCells: fc2 } = gravity(); await animateGravity(fc2); await animateNewTiles(nt); await processMatches();
     state.animating = false; await checkLevelEnd(); return;
   }
 
