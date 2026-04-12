@@ -998,7 +998,9 @@ function handleSpecialCombo(r1, c1, r2, c2) {
     return toRemove;
   }
 
-  // One is special, one is not — activate the special normally via match processing
+  // One special + one normal: activate the special during match processing
+  // But if it's a striped/wrapped being swapped without making a match, still allow swap
+  // The special will be activated if its cell is part of a match
   return null;
 }
 
@@ -1011,26 +1013,50 @@ function swap(r1, c1, r2, c2) {
 function gravity() {
   const newTiles = [];
   for (let c = 0; c < COLS; c++) {
-    let writePos = ROWS - 1;
-    for (let r = ROWS - 1; r >= 0; r--) {
+    // Process sections separated by blockers independently
+    // Find blocker positions in this column
+    const blockerRows = new Set();
+    for (let r = 0; r < ROWS; r++) {
       const cell = state.board[r][c];
       if (cell.blocker === BLOCKER.STONE || cell.blocker === BLOCKER.CHOCOLATE) {
-        writePos = r - 1;
-        continue;
-      }
-      if (cell.type >= 0) {
-        if (r !== writePos) {
-          state.board[writePos][c] = cell;
-          state.board[r][c] = makeCell(EMPTY);
-        }
-        writePos--;
+        blockerRows.add(r);
       }
     }
-    for (let r = writePos; r >= 0; r--) {
-      if (state.board[r][c].type === EMPTY && state.board[r][c].blocker === BLOCKER.NONE) {
-        state.board[r][c] = makeCell(randomCandy());
-        newTiles.push({ r, c });
+
+    // Process each section (from bottom of section upward)
+    let sectionEnd = ROWS - 1;
+    while (sectionEnd >= 0) {
+      if (blockerRows.has(sectionEnd)) {
+        sectionEnd--;
+        continue;
       }
+      // Find the top of this section
+      let sectionStart = sectionEnd;
+      while (sectionStart > 0 && !blockerRows.has(sectionStart - 1)) {
+        sectionStart--;
+      }
+
+      // Compact candies downward within this section
+      let writePos = sectionEnd;
+      for (let r = sectionEnd; r >= sectionStart; r--) {
+        const cell = state.board[r][c];
+        if (cell.type >= 0) {
+          if (r !== writePos) {
+            state.board[writePos][c] = cell;
+            state.board[r][c] = makeCell(EMPTY);
+          }
+          writePos--;
+        }
+      }
+      // Fill empty cells from top of section
+      for (let r = writePos; r >= sectionStart; r--) {
+        if (state.board[r][c].type === EMPTY && state.board[r][c].blocker === BLOCKER.NONE) {
+          state.board[r][c] = makeCell(randomCandy());
+          newTiles.push({ r, c });
+        }
+      }
+
+      sectionEnd = sectionStart - 1;
     }
   }
   return newTiles;
@@ -1231,7 +1257,8 @@ async function processMatches() {
 
 async function endOfLevelBonus() {
   state.bonusPhase = true;
-  const bonusMoves = state.movesLeft;
+  const bonusMoves = Math.max(state.movesLeft, 0);
+  if (bonusMoves === 0) { state.bonusPhase = false; return; }
   for (let i = 0; i < bonusMoves; i++) {
     const playable = [];
     for (let r = 0; r < ROWS; r++)
@@ -1396,25 +1423,18 @@ async function checkLevelEnd() {
 
   if (state.movesLeft <= 0) {
     if (state.score >= ld.stars[0]) {
-      // Win! Run bonus first
-      await endOfLevelBonus();
-
-      const earnedStars = state.score >= ld.stars[2] ? 3 : state.score >= ld.stars[1] ? 2 : 1;
-      state.stars = earnedStars;
-      const prev = state.progress[state.level] || 0;
-      if (earnedStars > prev) {
-        state.progress[state.level] = earnedStars;
-        saveProgress();
-      }
-      state.screen = SCREEN.LEVEL_COMPLETE;
-      sfxWin();
-      addConfetti(W / 2, H * 0.35, 40);
+      // Win! (no moves left, but score met)
+      await showWin();
     } else {
       state.screen = SCREEN.LEVEL_FAILED;
       sfxLose();
     }
     return;
   }
+
+  // Check if score target met with moves remaining — win with bonus!
+  // Only trigger once score crosses the 1-star threshold for the first time
+  // We don't auto-win mid-game; player keeps playing until out of moves.
 
   // Auto-shuffle if no valid moves
   const validMove = hasValidMoves();
@@ -1426,6 +1446,25 @@ async function checkLevelEnd() {
       shuffleBoard();
     }
   }
+}
+
+async function showWin() {
+  // Run end-of-level bonus: convert remaining moves to specials
+  if (state.movesLeft > 0) {
+    await endOfLevelBonus();
+  }
+
+  const ld = state.levelData;
+  const earnedStars = state.score >= ld.stars[2] ? 3 : state.score >= ld.stars[1] ? 2 : 1;
+  state.stars = earnedStars;
+  const prev = state.progress[state.level] || 0;
+  if (earnedStars > prev) {
+    state.progress[state.level] = earnedStars;
+    saveProgress();
+  }
+  state.screen = SCREEN.LEVEL_COMPLETE;
+  sfxWin();
+  addConfetti(W / 2, H * 0.35, 40);
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1467,10 +1506,11 @@ function generateLevels() {
 
     const blockers = Array.from({ length: ROWS }, () => Array(COLS).fill(BLOCKER.NONE));
 
-    if (i >= 8 && i <= 13) {
+    if (i >= 8 && i <= 10) {
       placeRandomBlockers(blockers, BLOCKER.ICE1, 2 + Math.floor((i - 7) * 1.2));
     } else if (i >= 11 && i <= 13) {
-      placeRandomBlockers(blockers, BLOCKER.ICE2, Math.floor((i - 10) * 0.8));
+      placeRandomBlockers(blockers, BLOCKER.ICE1, 3 + Math.floor((i - 10) * 0.8));
+      placeRandomBlockers(blockers, BLOCKER.ICE2, 1 + Math.floor((i - 10) * 0.7));
     } else if (i >= 14 && i <= 19) {
       placeRandomBlockers(blockers, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 13) * 0.7));
       placeRandomBlockers(blockers, BLOCKER.ICE1, 2 + Math.floor((i - 13) * 0.5));
