@@ -1,4 +1,4 @@
-# Candy Crush Match-3 — World-Class Upgrade Design
+# Sweet Match Match-3 — World-Class Upgrade Design
 
 ## Overview
 
@@ -85,7 +85,7 @@ Transform the basic match-3 prototype into a polished, addictive game with speci
 ## File Structure
 
 ```
-candy-crush/
+sweet-match/
   index.html   (~2500-3000 lines, fully self-contained)
 ```
 

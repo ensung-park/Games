@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Candy Crush Match-3</title>
+<title>Sweet Match</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -104,14 +104,14 @@ function makeCell(type, special, blocker) {
 
 function loadProgress() {
   try {
-    const saved = localStorage.getItem('candyCrushProgress');
+    const saved = localStorage.getItem('sweetMatchProgress');
     if (saved) state.progress = JSON.parse(saved);
   } catch(e) {}
 }
 
 function saveProgress() {
   try {
-    localStorage.setItem('candyCrushProgress', JSON.stringify(state.progress));
+    localStorage.setItem('sweetMatchProgress', JSON.stringify(state.progress));
   } catch(e) {}
 }
 
@@ -1809,7 +1809,7 @@ function drawLevelSelect() {
   ctx.font = `bold ${Math.floor(cellSize * 0.7)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('Candy Crush', W / 2, H * 0.08);
+  ctx.fillText('Sweet Match', W / 2, H * 0.08);
 
   ctx.font = `${Math.floor(cellSize * 0.32)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillStyle = '#aaa';

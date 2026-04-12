@@ -1,8 +1,8 @@
-# Candy Crush v2: Cloud Save, Google Auth, Graphics Polish & Public Deploy
+# Sweet Match v2: Cloud Save, Google Auth, Graphics Polish & Public Deploy
 
 ## Overview
 
-Transform the Candy Crush game from a local single-player experience into a publicly accessible web game with Google account login, cloud-synced progress, improved visual animations, and a leaderboard. Deploy on GitHub Pages with Firebase for auth and data.
+Transform the Sweet Match game from a local single-player experience into a publicly accessible web game with Google account login, cloud-synced progress, improved visual animations, and a leaderboard. Deploy on GitHub Pages with Firebase for auth and data.
 
 ## Architecture
 
@@ -208,7 +208,7 @@ graph LR
 
 ```
 Games/
-  candy-crush/
+  sweet-match/
     index.html          (game - loads Firebase from CDN)
   firebase.json         (Firebase hosting config, optional)
   firestore.rules       (Firestore security rules)
@@ -223,7 +223,7 @@ The game remains a single `index.html` file. Firebase SDKs are loaded from CDN (
 ### GitHub Pages
 - Repo must be **public** (or GitHub Pro for private Pages)
 - Enable Pages in repo Settings -> Pages -> Source: "Deploy from a branch" -> `master` / `root`
-- Game accessible at `https://ensung-park.github.io/Games/candy-crush/`
+- Game accessible at `https://ensung-park.github.io/Games/sweet-match/`
 
 ### Firebase Setup (One-time)
 1. Create Firebase project at console.firebase.google.com

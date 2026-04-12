@@ -1,10 +1,10 @@
-# Candy Crush World-Class Upgrade Implementation Plan
+# Sweet Match World-Class Upgrade Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Transform the basic match-3 prototype into a polished, addictive game with canvas rendering, special candies, level progression, obstacles, procedural audio, and full visual polish — all in a single self-contained HTML file.
 
-**Architecture:** Complete rewrite of `candy-crush/index.html`. The game uses HTML5 Canvas for rendering with a requestAnimationFrame loop. Game state is managed by a central state object. The file is organized into clearly separated sections: constants/config, game state, audio engine, animation/particle system, rendering, game logic (matching/specials/blockers), level definitions, input handling, UI screens, and initialization.
+**Architecture:** Complete rewrite of `sweet-match/index.html`. The game uses HTML5 Canvas for rendering with a requestAnimationFrame loop. Game state is managed by a central state object. The file is organized into clearly separated sections: constants/config, game state, audio engine, animation/particle system, rendering, game logic (matching/specials/blockers), level definitions, input handling, UI screens, and initialization.
 
 **Tech Stack:** Vanilla JavaScript, HTML5 Canvas 2D, Web Audio API, localStorage. No external dependencies.
 
@@ -12,7 +12,7 @@
 
 ## File Structure
 
-- **Rewrite:** `candy-crush/index.html` — the entire game in one file (~2500-3000 lines)
+- **Rewrite:** `sweet-match/index.html` — the entire game in one file (~2500-3000 lines)
 
 The file is organized into these `<script>` sections via comments:
 
@@ -36,13 +36,13 @@ The file is organized into these `<script>` sections via comments:
 ### Task 1: Canvas Bootstrap & Basic Candy Rendering
 
 **Files:**
-- Rewrite: `candy-crush/index.html`
+- Rewrite: `sweet-match/index.html`
 
 Replace the entire file with the canvas-based foundation. This task creates the HTML shell, canvas element, constants, game state structure, and renders a static 8x8 grid of colored candies.
 
 - [ ] **Step 1: Write the HTML shell with canvas**
 
-Replace `candy-crush/index.html` with:
+Replace `sweet-match/index.html` with:
 
 ```html
 <!DOCTYPE html>
@@ -50,7 +50,7 @@ Replace `candy-crush/index.html` with:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Candy Crush Match-3</title>
+<title>Sweet Match Match-3</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -157,14 +157,14 @@ function makeCell(type, special, blocker) {
 
 function loadProgress() {
   try {
-    const saved = localStorage.getItem('candyCrushProgress');
+    const saved = localStorage.getItem('sweetMatchProgress');
     if (saved) state.progress = JSON.parse(saved);
   } catch(e) {}
 }
 
 function saveProgress() {
   try {
-    localStorage.setItem('candyCrushProgress', JSON.stringify(state.progress));
+    localStorage.setItem('sweetMatchProgress', JSON.stringify(state.progress));
   } catch(e) {}
 }
 
@@ -1527,7 +1527,7 @@ function drawLevelSelect() {
   titleGrad.addColorStop(0.5, '#ffb347');
   titleGrad.addColorStop(1, '#ff6bca');
   ctx.fillStyle = titleGrad;
-  ctx.fillText('Candy Crush', W / 2, H * 0.08);
+  ctx.fillText('Sweet Match', W / 2, H * 0.08);
 
   ctx.font = `${Math.floor(cellSize * 0.35)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillStyle = '#ccc';
@@ -1803,7 +1803,7 @@ requestAnimationFrame(gameLoop);
 
 - [ ] **Step 2: Open in browser and verify**
 
-Open `candy-crush/index.html` in a browser. You should see:
+Open `sweet-match/index.html` in a browser. You should see:
 - Level select screen with 30 levels in a 5x6 grid
 - Level 1 is clickable (green), rest are locked (grey)
 - Clicking Level 1 shows the game board with colored candy shapes
@@ -1819,8 +1819,8 @@ Open `candy-crush/index.html` in a browser. You should see:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add candy-crush/index.html
-git commit -m "feat: complete Candy Crush rewrite with canvas rendering, specials, levels, audio, and polish"
+git add sweet-match/index.html
+git commit -m "feat: complete Sweet Match rewrite with canvas rendering, specials, levels, audio, and polish"
 ```
 
 ---
@@ -1828,7 +1828,7 @@ git commit -m "feat: complete Candy Crush rewrite with canvas rendering, special
 ### Task 2: Gameplay Polish & Bug Fixes
 
 **Files:**
-- Modify: `candy-crush/index.html`
+- Modify: `sweet-match/index.html`
 
 Play through levels 1-5 and fix any issues found. Common things to verify and fix:
 
@@ -1859,7 +1859,7 @@ Complete level 1 and verify level 2 unlocks. Verify stars are saved to localStor
 - [ ] **Step 6: Commit fixes**
 
 ```bash
-git add candy-crush/index.html
+git add sweet-match/index.html
 git commit -m "fix: gameplay polish and bug fixes from playtesting"
 ```
 
@@ -1868,7 +1868,7 @@ git commit -m "fix: gameplay polish and bug fixes from playtesting"
 ### Task 3: End-of-Level Bonus & Final Polish
 
 **Files:**
-- Modify: `candy-crush/index.html`
+- Modify: `sweet-match/index.html`
 
 - [ ] **Step 1: Add end-of-level bonus move conversion**
 
@@ -1915,6 +1915,6 @@ Win a level with remaining moves. Verify specials appear and detonate one by one
 - [ ] **Step 3: Final commit**
 
 ```bash
-git add candy-crush/index.html
+git add sweet-match/index.html
 git commit -m "feat: add end-of-level bonus and final polish"
 ```
