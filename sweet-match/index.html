@@ -982,8 +982,11 @@ function handleTitleClick(px, py) {
   if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
 }
 
+// Touch offset: fingers hit ~20px below where users aim
+const TOUCH_OFFSET_Y = ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? -18 : 0;
+
 function onPointerDown(e) {
-  e.preventDefault(); const px = e.clientX, py = e.clientY;
+  e.preventDefault(); const px = e.clientX, py = e.clientY + TOUCH_OFFSET_Y;
   if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; sfxClick(); return; }
   if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; return; }
   if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
@@ -995,7 +998,7 @@ function onPointerDown(e) {
 
 function onPointerUp(e) {
   e.preventDefault(); if (pStartX === null) return;
-  if (state.screen === SCREEN.PLAYING) handleSwipe(pStartX, pStartY, e.clientX, e.clientY);
+  if (state.screen === SCREEN.PLAYING) handleSwipe(pStartX, pStartY, e.clientX, e.clientY + TOUCH_OFFSET_Y);
   pStartX = pStartY = null;
 }
 
