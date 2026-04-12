@@ -94,13 +94,7 @@ const firebase = {
         highestLevel: highestLevel,
         lastPlayed: new Date().toISOString(),
       };
-      const snap = await getDoc(userRef);
-      if (snap.exists()) {
-        await updateDoc(userRef, data);
-      } else {
-        data.createdAt = new Date().toISOString();
-        await setDoc(userRef, data);
-      }
+      await setDoc(userRef, data, { merge: true });
       // Update leaderboard
       const lbRef = doc(db, 'leaderboard', this.user.uid);
       await setDoc(lbRef, {
@@ -128,24 +122,7 @@ const firebase = {
   }
 };
 
-// Auth state listener
-onAuthStateChanged(auth, async (user) => {
-  firebase.user = user;
-  firebase.ready = true;
-  if (user && state.screen === SCREEN.TITLE) {
-    // Merge local progress with cloud
-    const cloud = await firebase.loadCloudProgress();
-    if (cloud) {
-      for (const key in cloud) {
-        const cloudStars = cloud[key] || 0;
-        const localStars = state.progress[key] || 0;
-        state.progress[key] = Math.max(cloudStars, localStars);
-      }
-      saveProgressLocal();
-    }
-    state.screen = SCREEN.LEVEL_SELECT;
-  }
-});
+// Auth state listener (registered after game state init, see bottom of file)
 
 // ═══════════════════════════════════════════════════════
 // SECTION 1: CONSTANTS & CONFIGURATION
@@ -253,8 +230,6 @@ async function saveProgress() {
     await firebase.saveCloudProgress(state.progress, totalStars, highestLevel);
   }
 }
-
-loadProgressLocal();
 
 // ═══════════════════════════════════════════════════════
 // SECTION 3: AUDIO ENGINE
@@ -706,6 +681,7 @@ async function animateNewTiles(tiles) {
 async function processMatches() {
   let cascade = 0, clearedChoc = false;
   while (true) {
+    if (state.screen !== SCREEN.PLAYING && state.screen !== SCREEN.LEVEL_COMPLETE && state.screen !== SCREEN.LEVEL_FAILED) return;
     const groups = findMatchGroups(), allM = findAllMatchedCells();
     if (!allM.length) break;
     cascade++; state.cascade = cascade;
@@ -1197,6 +1173,36 @@ function gameLoop(time) {
 }
 
 loadProgressLocal(); resize(); requestAnimationFrame(gameLoop);
+
+// Register auth listener AFTER all game state is initialized
+onAuthStateChanged(auth, async (user) => {
+  firebase.user = user;
+  firebase.ready = true;
+  if (user && state.screen === SCREEN.TITLE) {
+    // Merge local progress with cloud (keep best stars from each)
+    const cloud = await firebase.loadCloudProgress();
+    if (cloud) {
+      let changed = false;
+      // Merge cloud -> local
+      for (const key in cloud) {
+        const best = Math.max(cloud[key] || 0, state.progress[key] || 0);
+        if (best !== (state.progress[key] || 0)) changed = true;
+        state.progress[key] = best;
+      }
+      // Merge local -> cloud (local-only levels)
+      for (const key in state.progress) {
+        if (!cloud[key] && state.progress[key] > 0) changed = true;
+      }
+      saveProgressLocal();
+      // Push merged progress to cloud
+      if (changed) {
+        const { totalStars, highestLevel } = getProgressStats();
+        await firebase.saveCloudProgress(state.progress, totalStars, highestLevel);
+      }
+    }
+    state.screen = SCREEN.LEVEL_SELECT;
+  }
+});
 
 </script>
 </body>
