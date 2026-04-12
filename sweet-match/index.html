@@ -6,19 +6,16 @@
 <title>Sweet Match</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
 body {
   background: #1a0533;
-  min-height: 100vh;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  overflow: hidden;
+  margin: 0;
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   -webkit-user-select: none;
   user-select: none;
   touch-action: none;
 }
-canvas { display: block; }
+canvas { display: block; position: fixed; top: 0; left: 0; }
 </style>
 </head>
 <body>
