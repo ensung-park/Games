@@ -297,6 +297,82 @@ function playNoise(dur, vol, delay) {
   } catch (e) {}
 }
 
+// ── Background Music (procedural loop) ──
+let bgMusicPlaying = false;
+let bgMusicNodes = [];
+let bgMusicInterval = null;
+
+function startBgMusic() {
+  if (!soundEnabled || !audioCtx || bgMusicPlaying) return;
+  bgMusicPlaying = true;
+
+  // Create a soft ambient pad
+  const padGain = audioCtx.createGain();
+  padGain.gain.setValueAtTime(0.03, audioCtx.currentTime);
+  padGain.connect(audioCtx.destination);
+
+  // Two detuned oscillators for warm pad
+  for (const detune of [-5, 5]) {
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(220, audioCtx.currentTime); // A3
+    osc.detune.setValueAtTime(detune, audioCtx.currentTime);
+    osc.connect(padGain);
+    osc.start();
+    bgMusicNodes.push(osc);
+  }
+  // Third oscillator for 5th harmony
+  const osc3 = audioCtx.createOscillator();
+  osc3.type = 'sine';
+  osc3.frequency.setValueAtTime(330, audioCtx.currentTime); // E4
+  const g3 = audioCtx.createGain();
+  g3.gain.setValueAtTime(0.015, audioCtx.currentTime);
+  osc3.connect(g3); g3.connect(audioCtx.destination);
+  osc3.start();
+  bgMusicNodes.push(osc3, g3);
+  bgMusicNodes.push(padGain);
+
+  // Melodic sequence that loops
+  const melody = [523, 587, 659, 587, 523, 494, 440, 494]; // C D E D C B A B
+  const melodyDur = 0.4;
+  let melodyIdx = 0;
+
+  bgMusicInterval = setInterval(() => {
+    if (!soundEnabled || !audioCtx || !bgMusicPlaying) return;
+    const t = audioCtx.currentTime;
+    const freq = melody[melodyIdx % melody.length];
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.04, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + melodyDur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(t); o.stop(t + melodyDur);
+
+    // Soft harmony note
+    const o2 = audioCtx.createOscillator();
+    const g2 = audioCtx.createGain();
+    o2.type = 'sine';
+    o2.frequency.setValueAtTime(freq * 0.5, t); // octave below
+    g2.gain.setValueAtTime(0.02, t);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + melodyDur * 1.2);
+    o2.connect(g2); g2.connect(audioCtx.destination);
+    o2.start(t); o2.stop(t + melodyDur * 1.2);
+
+    melodyIdx++;
+  }, 500);
+}
+
+function stopBgMusic() {
+  bgMusicPlaying = false;
+  if (bgMusicInterval) { clearInterval(bgMusicInterval); bgMusicInterval = null; }
+  for (const node of bgMusicNodes) {
+    try { if (node.stop) node.stop(); else if (node.disconnect) node.disconnect(); } catch (e) {}
+  }
+  bgMusicNodes = [];
+}
+
 // Rich match sound: major chord that rises with cascade level
 function sfxMatch(n) {
   const base = 350 + n * 100;
@@ -976,7 +1052,7 @@ async function showWin() {
   state.stars = es;
   const prev = state.progress[state.level] || 0;
   if (es > prev) { state.progress[state.level] = es; await saveProgress(); }
-  state.screen = SCREEN.LEVEL_COMPLETE; sfxWin();
+  stopBgMusic(); state.screen = SCREEN.LEVEL_COMPLETE; sfxWin();
   // Fireworks celebration
   addConfetti(W / 2, H * 0.35, 50);
   addConfetti(W * 0.3, H * 0.4, 25);
@@ -1007,7 +1083,7 @@ async function checkLevelEnd() {
 
   if (state.movesLeft <= 0) {
     if (isGoalMet()) { await showWin(); }
-    else { state.screen = SCREEN.LEVEL_FAILED; sfxLose(); }
+    else { stopBgMusic(); state.screen = SCREEN.LEVEL_FAILED; sfxLose(); }
     return;
   }
   if (!hasValidMoves()) { shuffleBoard(); addFloatingText(W / 2, H / 2, 'SHUFFLE!', '#ffb347', Math.floor(cellSize * 0.6)); if (!hasValidMoves()) shuffleBoard(); }
@@ -1066,7 +1142,7 @@ const ALL_LEVELS = generateLevels();
 let pStartX = null, pStartY = null;
 function getClickedCell(px, py) { const c = Math.floor((px - boardX) / cellSize), r = Math.floor((py - boardY) / cellSize); return (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? { r, c } : null; }
 function isSoundToggle(px, py) { const hs = Math.max(55, cellSize); return px > W - hs && py < hs * 0.8; }
-function isBackButton(px, py) { return px < 80 && py < 45 && (state.screen === SCREEN.PLAYING || state.screen === SCREEN.LEADERBOARD) && !state.animating; }
+function isBackButton(px, py) { return px < 100 && py < 55 && (state.screen === SCREEN.PLAYING || state.screen === SCREEN.LEADERBOARD); }
 
 function handleBoardClick(px, py) {
   if (state.animating || state.screen !== SCREEN.PLAYING) return;
@@ -1201,8 +1277,8 @@ function pointerToCanvas(e) {
 
 function onPointerDown(e) {
   e.preventDefault(); const { x: px, y: py } = pointerToCanvas(e);
-  if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; sfxClick(); return; }
-  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; return; }
+  if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; if (!soundEnabled) stopBgMusic(); else if (state.screen === SCREEN.PLAYING) startBgMusic(); sfxClick(); return; }
+  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = []; stopBgMusic(); return; }
   if (state.screen === SCREEN.GOAL_PREVIEW) { state.screen = SCREEN.PLAYING; return; }
   if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
   if (state.screen === SCREEN.LEVEL_SELECT) { handleLevelSelectClick(px, py); return; }
@@ -1509,6 +1585,9 @@ function startLevel(n) {
 
   createBoard(ld);
   let att = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att < 150) { createBoard(ld); att++; }
+
+  // Start background music
+  ensureAudio(); startBgMusic();
 
   // Initialize goal-specific state
   if (ld.goal === GOAL.CLEAR_JELLY) {
