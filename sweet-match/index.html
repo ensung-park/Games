@@ -1512,6 +1512,11 @@ function pointerToCanvas(e) {
 let _lastTapTime = 0, _tapWhileAnimating = 0;
 function onPointerDown(e) {
   e.preventDefault(); const { x: px, y: py } = pointerToCanvas(e);
+  // Tap top-left corner 5x to toggle debug overlay
+  if (px < 60 && py < 60) {
+    _debugTapCount++;
+    if (_debugTapCount >= 5) { _debugMode = !_debugMode; _debugTapCount = 0; console.log('Debug mode:', _debugMode); }
+  } else { _debugTapCount = 0; }
   // Safety: if animating for too long and user taps, force-unlock
   if (state.animating && state.screen === SCREEN.PLAYING) {
     const now = Date.now();
@@ -2009,9 +2014,16 @@ function getGoalText(ld) {
   return `Score ${ld.stars[0].toLocaleString()} points!`;
 }
 
+// ── Debug overlay (tap top-left corner 5× to toggle) ──
+let _debugMode = false, _debugTapCount = 0, _debugTapTimer = 0;
+let _fps = 60, _fpsSmooth = 60, _freezeLog = [];
+
 let lastTime = 0;
 function gameLoop(time) {
-  const dt = Math.min((time - lastTime) / 1000, 0.05); lastTime = time;
+  const rawDt = (time - lastTime) / 1000;
+  const dt = Math.min(rawDt, 0.05); lastTime = time;
+  _fps = rawDt > 0 ? 1 / rawDt : 60;
+  _fpsSmooth = _fpsSmooth * 0.9 + _fps * 0.1;
   updateTweens(dt); updateParticles(dt);
 
   // Goal preview countdown
@@ -2109,6 +2121,31 @@ function gameLoop(time) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('CB', cbX2 + cbW2 / 2, cbY2 + cbH2 / 2);
     state._cbBtnGame = { x: cbX2, y: cbY2, w: cbW2, h: cbH2 };
   }
+  // Debug overlay
+  if (_debugMode && state.screen === SCREEN.PLAYING) {
+    const lines = [
+      `FPS: ${Math.round(_fpsSmooth)}`,
+      `animating: ${state.animating}`,
+      `tweens: ${state.tweens.length}`,
+      `cascade: ${state.cascade}`,
+      `bonusPhase: ${state.bonusPhase}`,
+      `floatingTexts: ${state.floatingTexts.length}`,
+      `particles: ${state.particles.length}`,
+      `screen: ${state.screen}`,
+    ];
+    if (_freezeLog.length) lines.push(..._freezeLog.slice(-3).map(l => '⚠ ' + l));
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, 200, lines.length * 18 + 10);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#0f0';
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    lines.forEach((l, i) => ctx.fillText(l, 5, 5 + i * 18));
+    ctx.restore();
+  }
+
   requestAnimationFrame(gameLoop);
 }
 
@@ -2188,7 +2225,9 @@ setInterval(() => {
     const now = Date.now();
     if (!_animWatchdogStart) { _animWatchdogStart = now; return; }
     if (now - _animWatchdogStart > 1500) {
-      console.warn('Watchdog: force-resetting stuck state.animating after', now - _animWatchdogStart, 'ms');
+      const msg = `stuck ${now - _animWatchdogStart}ms tweens=${state.tweens.length} cascade=${state.cascade} bonus=${state.bonusPhase}`;
+      console.warn('Watchdog:', msg);
+      _freezeLog.push(msg);
       state.animating = false;
       state.bonusPhase = false;
       state.tweens = [];
