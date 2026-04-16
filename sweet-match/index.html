@@ -1482,11 +1482,20 @@ canvas.addEventListener('pointermove', e => e.preventDefault());
 
 function drawTitleBgCandies() {
   const now = performance.now() * 0.001;
-  ctx.globalAlpha = 0.07;
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 30; i++) {
     const x = ((i * 137.5 + now * 12) % (W + 100)) - 50;
     const y = ((i * 89.3 + now * (6 + i * 1.5)) % (H + 100)) - 50;
-    drawCandyShape(x, y, cellSize * 0.4, i % CANDY_TYPES); ctx.fillStyle = COLORS[i % CANDY_TYPES].main; ctx.fill();
+    const sizeScale = 0.3 + (((i * 73) % 100) / 100) * 0.4;
+    const rot = now * 0.3 + i * 1.1;
+    const col = COLORS[i % CANDY_TYPES];
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.translate(x, y); ctx.rotate(rot);
+    ctx.shadowColor = col.main; ctx.shadowBlur = 8;
+    drawCandyShape(0, 0, cellSize * sizeScale, i % CANDY_TYPES);
+    ctx.fillStyle = col.main; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
   }
   ctx.globalAlpha = 1;
 }
