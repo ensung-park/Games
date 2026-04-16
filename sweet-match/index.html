@@ -2020,6 +2020,8 @@ let _fps = 60, _fpsSmooth = 60, _freezeLog = [];
 
 let lastTime = 0;
 function gameLoop(time) {
+  requestAnimationFrame(gameLoop); // FIRST: ensure loop never dies
+  try {
   const rawDt = (time - lastTime) / 1000;
   const dt = Math.min(rawDt, 0.05); lastTime = time;
   _fps = rawDt > 0 ? 1 / rawDt : 60;
@@ -2081,14 +2083,13 @@ function gameLoop(time) {
 
   // Edge flash for combos
   if (state.edgeFlash && state.edgeFlash.life > 0) {
-    const ef = state.edgeFlash, alpha = ef.life * 0.6;
+    const ef = state.edgeFlash;
+    ctx.globalAlpha = ef.life * 0.5;
+    ctx.fillStyle = ef.color;
+    const r = Math.max(W, H) * 0.3;
     const corners = [[0, 0], [W, 0], [0, H], [W, H]];
     for (const [cx, cy] of corners) {
-      const eg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.4);
-      eg.addColorStop(0, ef.color.replace(')', `,${alpha})`).replace('rgb', 'rgba').replace('#', ''));
-      // Convert hex to rgba
-      ctx.fillStyle = ef.color; ctx.globalAlpha = alpha * 0.3;
-      ctx.beginPath(); ctx.arc(cx, cy, Math.max(W, H) * 0.25, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalAlpha = 1;
     ef.life -= dt;
@@ -2146,7 +2147,12 @@ function gameLoop(time) {
     ctx.restore();
   }
 
-  requestAnimationFrame(gameLoop);
+  } catch(e) {
+    console.error('gameLoop error (loop kept alive):', e);
+    _freezeLog.push('gameLoop err: ' + e.message);
+    ctx.globalAlpha = 1;
+    if (dpr) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
 }
 
 loadProgressLocal(null); resize(); requestAnimationFrame(gameLoop);
