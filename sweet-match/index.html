@@ -536,7 +536,10 @@ function updateTweens(dt) {
     const ef = tw.easing === 'easeIn' ? easeIn : tw.easing === 'easeInOut' ? easeInOut : tw.easing === 'bounce' ? easeBounce : easeOut;
     const et = ef(t);
     for (const k in tw.end) tw.obj[k] = tw.start[k] + (tw.end[k] - tw.start[k]) * et;
-    if (t >= 1) { state.tweens.splice(i, 1); if (tw.onDone) tw.onDone(); }
+    if (t >= 1) {
+      if (tw.end.removeScale !== undefined && tw.end.removeScale === 0) tw.obj.alpha = 0;
+      state.tweens.splice(i, 1); if (tw.onDone) tw.onDone();
+    }
   }
 }
 
@@ -741,6 +744,7 @@ function drawParticles() {
 }
 
 function drawFloatingTexts() {
+  ctx.globalAlpha = 1;
   for (const ft of state.floatingTexts) {
     ctx.globalAlpha = Math.min(1, ft.life / ft.maxLife * 2);
     ctx.font = `bold ${ft.size}px 'Segoe UI', system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -748,7 +752,8 @@ function drawFloatingTexts() {
       const elapsed = ft.maxLife - ft.life;
       const t = Math.min(elapsed / 0.3, 1);
       ft.scale = ft.scaleStart + (1 - ft.scaleStart) * (1 - (1 - t) * (1 - t)); // ease-out
-      ctx.save(); ctx.translate(ft.x, ft.y); ctx.scale(ft.scale, ft.scale);
+      const safeScale = (ft.scale && isFinite(ft.scale) && ft.scale > 0) ? ft.scale : 1;
+      ctx.save(); ctx.translate(ft.x, ft.y); ctx.scale(safeScale, safeScale);
       ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(ft.text, 1, 1);
       ctx.fillStyle = ft.color; ctx.fillText(ft.text, 0, 0);
       ctx.restore();
@@ -758,6 +763,7 @@ function drawFloatingTexts() {
     }
   }
   ctx.globalAlpha = 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
 function drawHUD() {
@@ -1032,7 +1038,10 @@ async function processMatches() {
         const p = cellToScreen(r, c); addParticle(p.x, p.y, COLORS[cell.type % CANDY_TYPES].main, 5);
         cell.removeScale = 1; cell.alpha = 1;
         squishTweens.push(
-          tween(cell, { removeScale: 1.25 }, 0.08, 'easeOut').then(() => tween(cell, { removeScale: 0, alpha: 0 }, 0.12, 'easeIn'))
+          Promise.race([
+            tween(cell, { removeScale: 1.25 }, 0.08, 'easeOut').then(() => tween(cell, { removeScale: 0, alpha: 0 }, 0.12, 'easeIn')),
+            new Promise(r => setTimeout(r, 300))
+          ])
         );
       }
     }
