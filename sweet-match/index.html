@@ -221,7 +221,13 @@ const state = {
   levelGen: 0, // incremented each startLevel, used to cancel stale async chains
   dailyChallenge: false,
   boosterCharges: 0,
+  transition: null, // { from, to, progress, duration }
 };
+
+function transitionTo(screen) {
+  state.transition = { from: state.screen, to: screen, progress: 0, duration: 0.25 };
+  state.screen = screen;
+}
 
 function makeCell(type, special, blocker) {
   return { type, special: special || SPECIAL.NONE, blocker: blocker || BLOCKER.NONE };
@@ -1431,7 +1437,7 @@ function handleTitleClick(px, py) {
   if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); firebase.signIn(); return; }
   // Play as Guest
   const by2 = by1 + bh + 16;
-  if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
+  if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); transitionTo(SCREEN.LEVEL_SELECT); return; }
 }
 
 // Convert pointer event to canvas coordinates (handles browser chrome, scrolling, etc.)
@@ -1929,7 +1935,23 @@ function gameLoop(time) {
     if (state.hintTimer > 5 && !state.hintMove) state.hintMove = hasValidMoves();
   }
 
+  // Update transition
+  if (state.transition) {
+    state.transition.progress += dt / state.transition.duration;
+    if (state.transition.progress >= 1) { state.transition = null; }
+  }
+
+  const transAlpha = state.transition ? state.transition.progress : 1;
+
   drawBackground();
+
+  // During transition, fade out old screen then fade in new
+  if (state.transition && transAlpha < 0.5) {
+    ctx.globalAlpha = 1 - transAlpha * 2;
+  } else if (state.transition) {
+    ctx.globalAlpha = (transAlpha - 0.5) * 2;
+  }
+
   if (state.screen === SCREEN.TITLE) drawTitleScreen();
   else if (state.screen === SCREEN.LEVEL_SELECT) drawLevelSelect();
   else if (state.screen === SCREEN.LEADERBOARD) drawLeaderboard();
@@ -1945,6 +1967,7 @@ function gameLoop(time) {
     if (state.screen === SCREEN.LEVEL_COMPLETE) drawLevelComplete();
     else if (state.screen === SCREEN.LEVEL_FAILED) drawLevelFailed();
   }
+  ctx.globalAlpha = 1;
 
   // Screen flash effect
   if (state.screenFlash > 0) {
