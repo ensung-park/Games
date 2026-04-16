@@ -238,19 +238,27 @@ function makeCell(type, special, blocker) {
   return { type, special: special || SPECIAL.NONE, blocker: blocker || BLOCKER.NONE };
 }
 
-function loadProgressLocal() {
+function progressKey(uid) {
+  return uid ? 'sweetMatchProgress_' + uid : 'sweetMatchProgress_guest';
+}
+function boosterKey(uid) {
+  return uid ? 'sweetMatchBoosters_' + uid : 'sweetMatchBoosters_guest';
+}
+
+function loadProgressLocal(uid) {
   try {
-    const saved = localStorage.getItem('sweetMatchProgress');
-    if (saved) state.progress = JSON.parse(saved);
-    const bc = localStorage.getItem('sweetMatchBoosters');
-    if (bc !== null) state.boosterCharges = Math.min(parseInt(bc) || 0, 3);
+    const saved = localStorage.getItem(progressKey(uid));
+    state.progress = saved ? JSON.parse(saved) : {};
+    const bc = localStorage.getItem(boosterKey(uid));
+    state.boosterCharges = bc !== null ? Math.min(parseInt(bc) || 0, 3) : 0;
   } catch (e) {}
 }
 
 function saveProgressLocal() {
   try {
-    localStorage.setItem('sweetMatchProgress', JSON.stringify(state.progress));
-    localStorage.setItem('sweetMatchBoosters', state.boosterCharges);
+    const uid = firebase.user ? firebase.user.uid : null;
+    localStorage.setItem(progressKey(uid), JSON.stringify(state.progress));
+    localStorage.setItem(boosterKey(uid), state.boosterCharges);
   } catch (e) {}
 }
 
@@ -2091,7 +2099,7 @@ function gameLoop(time) {
   requestAnimationFrame(gameLoop);
 }
 
-loadProgressLocal(); resize(); requestAnimationFrame(gameLoop);
+loadProgressLocal(null); resize(); requestAnimationFrame(gameLoop);
 
 // Handle redirect result (mobile Google Sign-In)
 getRedirectResult(auth).then(result => {
@@ -2126,31 +2134,36 @@ window.addEventListener('popstate', () => {
 
 // Register auth listener AFTER all game state is initialized
 onAuthStateChanged(auth, async (user) => {
+  const prevUser = firebase.user;
   firebase.user = user;
   firebase.ready = true;
-  if (user && state.screen === SCREEN.TITLE) {
-    // Merge local progress with cloud (keep best stars from each)
+
+  if (user) {
+    // Signed in — load this user's own progress (separate from guest)
+    loadProgressLocal(user.uid);
+    // Merge with cloud
     const cloud = await firebase.loadCloudProgress();
     if (cloud) {
       let changed = false;
-      // Merge cloud -> local
       for (const key in cloud) {
         const best = Math.max(cloud[key] || 0, state.progress[key] || 0);
         if (best !== (state.progress[key] || 0)) changed = true;
         state.progress[key] = best;
       }
-      // Merge local -> cloud (local-only levels)
       for (const key in state.progress) {
         if (!cloud[key] && state.progress[key] > 0) changed = true;
       }
       saveProgressLocal();
-      // Push merged progress to cloud
       if (changed) {
         const { totalStars, highestLevel } = getProgressStats();
         await firebase.saveCloudProgress(state.progress, totalStars, highestLevel);
       }
     }
-    state.screen = SCREEN.LEVEL_SELECT;
+    if (state.screen === SCREEN.TITLE) state.screen = SCREEN.LEVEL_SELECT;
+  } else if (prevUser) {
+    // Signed out — switch back to guest progress (separate storage)
+    loadProgressLocal(null);
+    state.screen = SCREEN.TITLE;
   }
 });
 
