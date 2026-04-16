@@ -718,8 +718,18 @@ function drawFloatingTexts() {
   for (const ft of state.floatingTexts) {
     ctx.globalAlpha = Math.min(1, ft.life / ft.maxLife * 2);
     ctx.font = `bold ${ft.size}px 'Segoe UI', system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(ft.text, ft.x + 1, ft.y + 1);
-    ctx.fillStyle = ft.color; ctx.fillText(ft.text, ft.x, ft.y);
+    if (ft.isCombo && ft.scaleStart) {
+      const elapsed = ft.maxLife - ft.life;
+      const t = Math.min(elapsed / 0.3, 1);
+      ft.scale = ft.scaleStart + (1 - ft.scaleStart) * (1 - (1 - t) * (1 - t)); // ease-out
+      ctx.save(); ctx.translate(ft.x, ft.y); ctx.scale(ft.scale, ft.scale);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(ft.text, 1, 1);
+      ctx.fillStyle = ft.color; ctx.fillText(ft.text, 0, 0);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillText(ft.text, ft.x + 1, ft.y + 1);
+      ctx.fillStyle = ft.color; ctx.fillText(ft.text, ft.x, ft.y);
+    }
   }
   ctx.globalAlpha = 1;
 }
@@ -971,10 +981,13 @@ async function processMatches() {
       // Combo celebration with escalating messages
       let msg = cascade + 'x COMBO!', msgColor = '#ff6bca';
       for (const cm of COMBO_MSGS) { if (cascade >= cm.min) { msg = cm.text; msgColor = cm.color; } }
-      addFloatingText(W / 2, boardY - 30, msg, msgColor, Math.floor(cellSize * (0.5 + cascade * 0.08)));
+      const ft = { x: W / 2, y: boardY - 30, text: msg, color: msgColor, life: 1.2, maxLife: 1.2, vy: -70, size: Math.floor(cellSize * (0.5 + cascade * 0.08)), scaleStart: 1.8, scale: 1.8, isCombo: true };
+      state.floatingTexts.push(ft);
       sfxCombo(cascade);
       // Screen flash for big combos
       if (cascade >= 4) { state.screenFlash = 0.3; }
+      // Edge flash for combo >= 3
+      if (cascade >= 3) { state.edgeFlash = { color: msgColor, life: 0.4 }; }
     }
 
     const matchedSet = new Set(allM), specPos = new Set(specials.map(s => s.r + ',' + s.c)), extraR = new Set();
@@ -1882,6 +1895,21 @@ function gameLoop(time) {
     ctx.fillRect(0, 0, W, H);
     state.screenFlash -= dt * 2;
     if (state.screenFlash < 0) state.screenFlash = 0;
+  }
+
+  // Edge flash for combos
+  if (state.edgeFlash && state.edgeFlash.life > 0) {
+    const ef = state.edgeFlash, alpha = ef.life * 0.6;
+    const corners = [[0, 0], [W, 0], [0, H], [W, H]];
+    for (const [cx, cy] of corners) {
+      const eg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.4);
+      eg.addColorStop(0, ef.color.replace(')', `,${alpha})`).replace('rgb', 'rgba').replace('#', ''));
+      // Convert hex to rgba
+      ctx.fillStyle = ef.color; ctx.globalAlpha = alpha * 0.3;
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(W, H) * 0.25, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ef.life -= dt;
   }
 
   // Moves counter pulse when low
