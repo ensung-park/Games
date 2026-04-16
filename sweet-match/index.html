@@ -582,9 +582,15 @@ function drawCandy(x, y, size, type, special, alpha) {
   grad.addColorStop(0, col.light); grad.addColorStop(0.5, col.main); grad.addColorStop(1, col.dark);
   ctx.fillStyle = grad; drawCandyShape(x, y, r, type); ctx.fill();
   ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.beginPath(); ctx.ellipse(x - r * 0.15, y - r * 0.28, r * 0.5, r * 0.3, -0.3, 0, Math.PI * 2); ctx.fill();
-  if (special === SPECIAL.STRIPED_H) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x - r * 0.65, y + i * r * 0.22); ctx.lineTo(x + r * 0.65, y + i * r * 0.22); ctx.stroke(); } }
-  else if (special === SPECIAL.STRIPED_V) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x + i * r * 0.22, y - r * 0.65); ctx.lineTo(x + i * r * 0.22, y + r * 0.65); ctx.stroke(); } }
-  else if (special === SPECIAL.WRAPPED) { ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r * 0.6, 0, Math.PI * 2); ctx.stroke(); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, r * 0.32, 0, Math.PI * 2); ctx.stroke(); }
+  const now = performance.now();
+  if (special === SPECIAL.STRIPED_H) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; const shimmer = Math.sin(now * 0.005) * r * 0.06; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x - r * 0.65, y + i * r * 0.22 + shimmer); ctx.lineTo(x + r * 0.65, y + i * r * 0.22 + shimmer); ctx.stroke(); } }
+  else if (special === SPECIAL.STRIPED_V) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; const shimmer = Math.sin(now * 0.005) * r * 0.06; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x + i * r * 0.22 + shimmer, y - r * 0.65); ctx.lineTo(x + i * r * 0.22 + shimmer, y + r * 0.65); ctx.stroke(); } }
+  else if (special === SPECIAL.WRAPPED) { const pulseR = 0.55 + 0.1 * Math.sin(now * 0.004); ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r * pulseR, 0, Math.PI * 2); ctx.stroke(); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, r * (pulseR - 0.25), 0, Math.PI * 2); ctx.stroke(); }
+  // Orbiting sparkle dots for specials
+  if (special !== SPECIAL.NONE && special !== SPECIAL.COLOR_BOMB) {
+    const sparkCount = 3, orbitR = r * 0.75;
+    for (let i = 0; i < sparkCount; i++) { const a = now * 0.003 + i * (Math.PI * 2 / sparkCount); ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.beginPath(); ctx.arc(x + Math.cos(a) * orbitR, y + Math.sin(a) * orbitR, 1.5, 0, Math.PI * 2); ctx.fill(); }
+  }
   ctx.restore();
 }
 
