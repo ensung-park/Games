@@ -24,7 +24,7 @@ canvas { display: block; position: fixed; top: 0; left: 0; }
 <!-- Firebase SDK (v12 modular, loaded as ES modules) -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-app.js";
-import { getAuth, signInWithPopup, signOut, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-auth.js";
+import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, collection, query, orderBy, limit, getDocs } from "https://www.gstatic.com/firebasejs/12.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -52,7 +52,13 @@ const firebase = {
 
   async signIn() {
     try {
-      await signInWithPopup(auth, googleProvider);
+      // On mobile, popups are often blocked — use redirect instead
+      const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+      if (isMobile) {
+        await signInWithRedirect(auth, googleProvider);
+      } else {
+        await signInWithPopup(auth, googleProvider);
+      }
     } catch (e) {
       console.warn('Sign-in failed:', e.message);
     }
@@ -1855,6 +1861,37 @@ function gameLoop(time) {
 }
 
 loadProgressLocal(); resize(); requestAnimationFrame(gameLoop);
+
+// Handle redirect result (mobile Google Sign-In)
+getRedirectResult(auth).then(result => {
+  if (result && result.user) {
+    // Auth state change will handle the rest via onAuthStateChanged
+    console.log('Redirect sign-in complete:', result.user.displayName);
+  }
+}).catch(e => console.warn('Redirect result error:', e.message));
+
+// ── Browser back-button handling ──────────────────────────────────────────
+// Push an initial state so the browser back button navigates within the game
+// instead of closing/exiting the page.
+history.pushState({ screen: 'game' }, '');
+window.addEventListener('popstate', () => {
+  // Always re-push so there's always a state to go back to
+  history.pushState({ screen: 'game' }, '');
+  // Navigate within game screens
+  if (state.screen === SCREEN.PLAYING || state.screen === SCREEN.GOAL_PREVIEW) {
+    sfxClick();
+    state.screen = SCREEN.LEVEL_SELECT;
+    state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = [];
+    state.dailyChallenge = false; stopBgMusic();
+  } else if (state.screen === SCREEN.LEADERBOARD || state.screen === SCREEN.LEVEL_FAILED || state.screen === SCREEN.LEVEL_COMPLETE) {
+    sfxClick();
+    state.screen = SCREEN.LEVEL_SELECT;
+  } else if (state.screen === SCREEN.LEVEL_SELECT) {
+    sfxClick();
+    state.screen = SCREEN.TITLE;
+  }
+  // On TITLE screen: do nothing (stay in app)
+});
 
 // Register auth listener AFTER all game state is initialized
 onAuthStateChanged(auth, async (user) => {
