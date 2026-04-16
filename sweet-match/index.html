@@ -168,7 +168,7 @@ function resize() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   cellSize = Math.floor(Math.min(W * 0.85, H * 0.50, 420) / COLS);
   boardX = Math.floor((W - cellSize * COLS) / 2);
-  boardY = Math.floor(H * 0.25);
+  boardY = Math.floor(H * (H > W * 1.6 ? 0.18 : 0.25));
 }
 
 window.addEventListener('resize', resize);
@@ -210,6 +210,8 @@ const state = {
   goalPreviewTimer: 0,
   screenFlash: 0,
   levelGen: 0, // incremented each startLevel, used to cancel stale async chains
+  dailyChallenge: false,
+  boosterCharges: 0,
 };
 
 function makeCell(type, special, blocker) {
@@ -220,12 +222,15 @@ function loadProgressLocal() {
   try {
     const saved = localStorage.getItem('sweetMatchProgress');
     if (saved) state.progress = JSON.parse(saved);
+    const bc = localStorage.getItem('sweetMatchBoosters');
+    if (bc !== null) state.boosterCharges = Math.min(parseInt(bc) || 0, 3);
   } catch (e) {}
 }
 
 function saveProgressLocal() {
   try {
     localStorage.setItem('sweetMatchProgress', JSON.stringify(state.progress));
+    localStorage.setItem('sweetMatchBoosters', state.boosterCharges);
   } catch (e) {}
 }
 
@@ -252,7 +257,7 @@ async function saveProgress() {
 // ═══════════════════════════════════════════════════════
 
 let audioCtx = null;
-let soundEnabled = true;
+let soundEnabled = (() => { try { const v = localStorage.getItem('sweetMatchSound'); return v === null ? true : v === 'true'; } catch(e) { return true; } })();
 
 function ensureAudio() {
   if (!audioCtx) {
@@ -374,8 +379,11 @@ function stopBgMusic() {
   bgMusicNodes = [];
 }
 
+function haptic(pattern) { try { if (navigator.vibrate) navigator.vibrate(pattern); } catch(e) {} }
+
 // Rich match sound: major chord that rises with cascade level
 function sfxMatch(n) {
+  haptic(20);
   const base = 350 + n * 100;
   playTone(base, 0.2, 'sine', 0.1);
   playTone(base * 1.25, 0.18, 'sine', 0.07, 0.03);   // major 3rd
@@ -397,6 +405,7 @@ function sfxSpecialCreate() {
 
 // Explosion: deep bass + noise burst + metallic ring
 function sfxExplosion() {
+  haptic([30, 10, 30]);
   playNoise(0.3, 0.15);
   playTone(80, 0.4, 'sine', 0.12);
   playTone(160, 0.2, 'triangle', 0.06, 0.02);
@@ -638,13 +647,18 @@ function drawBoard() {
     drawRoundedRect(p.x - cellSize / 2 + 3 + sx, p.y - cellSize / 2 + 3 + sy, cellSize - 6, cellSize - 6, 7); ctx.stroke(); ctx.shadowBlur = 0;
   }
 
-  // Hint
+  // Hint (bounce/pulse animation)
   if (state.hintMove && !state.selected && !state.animating && state.screen === SCREEN.PLAYING) {
-    const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
-    ctx.strokeStyle = `rgba(255,255,100,${0.2 + pulse * 0.5})`; ctx.lineWidth = 2;
+    const t = performance.now() * 0.005;
+    const pulse = 0.5 + 0.5 * Math.sin(t);
+    const scalePulse = 1 + 0.08 * Math.sin(t * 1.2);
+    ctx.strokeStyle = `rgba(255,255,100,${0.3 + pulse * 0.5})`; ctx.lineWidth = 2.5;
     for (const key of ['', '2']) {
       const h = cellToScreen(state.hintMove[key ? 'r2' : 'r'], state.hintMove[key ? 'c2' : 'c']);
-      drawRoundedRect(h.x - cellSize / 2 + 4 + sx, h.y - cellSize / 2 + 4 + sy, cellSize - 8, cellSize - 8, 7); ctx.stroke();
+      const hx = h.x + sx, hy = h.y + sy;
+      const sz = (cellSize - 6) * scalePulse;
+      drawRoundedRect(hx - sz / 2, hy - sz / 2, sz, sz, 7); ctx.stroke();
+      ctx.fillStyle = `rgba(255,255,100,${0.05 + pulse * 0.08})`; drawRoundedRect(hx - sz / 2, hy - sz / 2, sz, sz, 7); ctx.fill();
     }
   }
 }
@@ -683,7 +697,7 @@ function drawHUD() {
   tg.addColorStop(0, '#ff6bca'); tg.addColorStop(0.5, '#ffb347'); tg.addColorStop(1, '#ff6bca');
   ctx.fillStyle = tg; ctx.font = `bold ${Math.floor(cellSize * 0.42)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(`Level ${state.level}`, W / 2, boardY * 0.2);
+  ctx.fillText(state.dailyChallenge ? 'Daily Challenge' : `Level ${state.level}`, W / 2, boardY * 0.2);
 
   ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillText(state.score.toLocaleString(), W / 2, boardY * 0.48);
@@ -863,7 +877,7 @@ function spreadChocolate() {
 function clearAdjacentChocolate(matchedSet) {
   const rm = [];
   for (const key of matchedSet) { const [r, c] = key.split(',').map(Number); for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) { const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && state.board[nr][nc].blocker === BLOCKER.CHOCOLATE && !rm.some(x => x.r === nr && x.c === nc)) rm.push({ r: nr, c: nc }); } }
-  for (const { r, c } of rm) { state.board[r][c] = makeCell(EMPTY); const p = cellToScreen(r, c); addParticle(p.x, p.y, '#7b4a2b', 8); }
+  for (const { r, c } of rm) { state.board[r][c] = makeCell(EMPTY); const p = cellToScreen(r, c); addParticle(p.x, p.y, '#7b4a2b', 8); if (state.goalType === GOAL.CLEAR_CHOCOLATE && state.goalProgress.chocolateLeft > 0) state.goalProgress.chocolateLeft--; }
   return rm.length > 0;
 }
 
@@ -1024,7 +1038,7 @@ async function trySwap(r, c) {
       clearIceAt(rr, cc);
       const p = cellToScreen(rr, cc);
       if (state.board[rr][cc].type >= 0) addParticle(p.x, p.y, COLORS[state.board[rr][cc].type % CANDY_TYPES].main, 6);
-      else if (state.board[rr][cc].blocker === BLOCKER.CHOCOLATE) addParticle(p.x, p.y, '#7b4a2b', 6);
+      else if (state.board[rr][cc].blocker === BLOCKER.CHOCOLATE) { addParticle(p.x, p.y, '#7b4a2b', 6); if (state.goalType === GOAL.CLEAR_CHOCOLATE && state.goalProgress.chocolateLeft > 0) state.goalProgress.chocolateLeft--; }
       state.board[rr][cc] = makeCell(EMPTY);
     }
     state.score += combo.size * 30; addFloatingText(W / 2, H / 2, '+' + (combo.size * 30), '#ff6bca', Math.floor(cellSize * 0.6));
@@ -1072,7 +1086,8 @@ async function showWin() {
   const es = state.score >= ld.stars[2] ? 3 : state.score >= ld.stars[1] ? 2 : 1;
   state.stars = es;
   const prev = state.progress[state.level] || 0;
-  if (es > prev) { state.progress[state.level] = es; await saveProgress(); }
+  if (es === 3 && state.boosterCharges < 3) { state.boosterCharges++; }
+  if (es > prev) { state.progress[state.level] = es; await saveProgress(); } else { saveProgressLocal(); }
   stopBgMusic(); state.screen = SCREEN.LEVEL_COMPLETE; sfxWin();
   // Fireworks celebration
   addConfetti(W / 2, H * 0.35, 50);
@@ -1085,11 +1100,7 @@ function isGoalMet() {
   const ld = state.levelData;
   if (ld.goal === GOAL.CLEAR_JELLY) return state.goalProgress.jellyLeft <= 0;
   if (ld.goal === GOAL.COLLECT) return (state.goalProgress.collected || 0) >= state.goalProgress.target;
-  if (ld.goal === GOAL.CLEAR_CHOCOLATE) {
-    // Check if any chocolate remains on the board
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) return false;
-    return true;
-  }
+  if (ld.goal === GOAL.CLEAR_CHOCOLATE) return (state.goalProgress.chocolateLeft || 0) <= 0;
   return state.score >= ld.stars[0]; // SCORE goal
 }
 
@@ -1127,32 +1138,37 @@ function placeRandomBlockers(b, type, count) { let p = 0, a = 0; while (p < coun
 
 function generateLevels() {
   const levels = [];
-  for (let i = 1; i <= 30; i++) {
-    const tier = i <= 10 ? 'easy' : i <= 20 ? 'medium' : 'hard';
-    let m; if (tier === 'easy') m = 40 - Math.floor(i * 0.7); else if (tier === 'medium') m = 30 - Math.floor((i - 10) * 0.5); else m = 25 - Math.floor((i - 20) * 0.4); m = Math.max(m, 15);
+  for (let i = 1; i <= 50; i++) {
+    const tier = i <= 10 ? 'easy' : i <= 20 ? 'medium' : i <= 30 ? 'hard' : i <= 40 ? 'expert' : 'master';
+    let m;
+    if (tier === 'easy') m = 40 - Math.floor(i * 0.7);
+    else if (tier === 'medium') m = 30 - Math.floor((i - 10) * 0.5);
+    else if (tier === 'hard') m = 25 - Math.floor((i - 20) * 0.4);
+    else if (tier === 'expert') m = 22 - Math.floor((i - 30) * 0.3);
+    else m = 18 - Math.floor((i - 40) * 0.2);
+    m = Math.max(m, 12);
     const bs = 400 + i * 250, stars = [bs, Math.floor(bs * 1.7), Math.floor(bs * 2.6)];
     const bl = Array.from({ length: ROWS }, () => Array(COLS).fill(BLOCKER.NONE));
     if (i >= 8 && i <= 10) placeRandomBlockers(bl, BLOCKER.ICE1, 2 + Math.floor((i - 7) * 1.2));
     else if (i >= 11 && i <= 13) { placeRandomBlockers(bl, BLOCKER.ICE1, 3 + Math.floor((i - 10) * 0.8)); placeRandomBlockers(bl, BLOCKER.ICE2, 1 + Math.floor((i - 10) * 0.7)); }
     else if (i >= 14 && i <= 19) { placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 13) * 0.7)); placeRandomBlockers(bl, BLOCKER.ICE1, 2 + Math.floor((i - 13) * 0.5)); }
-    else if (i >= 20) { placeRandomBlockers(bl, BLOCKER.STONE, 1 + Math.floor((i - 19) * 0.4)); placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 19) * 0.5)); placeRandomBlockers(bl, BLOCKER.ICE2, 2 + Math.floor((i - 19) * 0.4)); }
+    else if (i >= 20 && i <= 30) { placeRandomBlockers(bl, BLOCKER.STONE, 1 + Math.floor((i - 19) * 0.4)); placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 1 + Math.floor((i - 19) * 0.5)); placeRandomBlockers(bl, BLOCKER.ICE2, 2 + Math.floor((i - 19) * 0.4)); }
+    else if (i >= 31 && i <= 40) { placeRandomBlockers(bl, BLOCKER.STONE, 2 + Math.floor((i - 30) * 0.5)); placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 2 + Math.floor((i - 30) * 0.6)); placeRandomBlockers(bl, BLOCKER.ICE2, 3 + Math.floor((i - 30) * 0.5)); placeRandomBlockers(bl, BLOCKER.ICE1, 2); }
+    else if (i >= 41) { placeRandomBlockers(bl, BLOCKER.STONE, 3 + Math.floor((i - 40) * 0.5)); placeRandomBlockers(bl, BLOCKER.CHOCOLATE, 3 + Math.floor((i - 40) * 0.7)); placeRandomBlockers(bl, BLOCKER.ICE2, 4 + Math.floor((i - 40) * 0.4)); placeRandomBlockers(bl, BLOCKER.ICE1, 3); }
 
     // Assign varied objectives
     let goal = GOAL.SCORE, goalData = {};
     if (i <= 3) {
-      goal = GOAL.SCORE; // Pure score for tutorial levels
+      goal = GOAL.SCORE;
     } else if (i % 5 === 0) {
-      // Every 5th level: collect specific candy types
       goal = GOAL.COLLECT;
       const ct = Math.floor(levelRng() * CANDY_TYPES);
       goalData = { collectType: ct, collectTarget: 15 + Math.floor(i * 1.5) };
     } else if (i >= 6 && i % 3 === 0) {
-      // Clear jelly levels
       goal = GOAL.CLEAR_JELLY;
       const jellyCount = 10 + Math.floor(i * 0.8);
-      goalData = { jellyCount: Math.min(jellyCount, 30) };
+      goalData = { jellyCount: Math.min(jellyCount, 40) };
     } else if (i >= 14 && i % 4 === 1) {
-      // Clear chocolate levels (only on levels that have chocolate)
       goal = GOAL.CLEAR_CHOCOLATE;
       goalData = {};
     }
@@ -1162,6 +1178,23 @@ function generateLevels() {
   return levels;
 }
 const ALL_LEVELS = generateLevels();
+
+// Daily Challenge: date-seeded level
+function getDailySeed() { const d = new Date(); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+function generateDailyLevel() {
+  const rng = seededRng(getDailySeed());
+  const goals = [GOAL.SCORE, GOAL.CLEAR_JELLY, GOAL.COLLECT, GOAL.CLEAR_CHOCOLATE];
+  const goal = goals[Math.floor(rng() * goals.length)];
+  const m = 20 + Math.floor(rng() * 10);
+  const bs = 5000 + Math.floor(rng() * 5000), stars = [bs, Math.floor(bs * 1.7), Math.floor(bs * 2.6)];
+  const bl = Array.from({ length: ROWS }, () => Array(COLS).fill(BLOCKER.NONE));
+  const blockerTypes = [BLOCKER.ICE1, BLOCKER.ICE2, BLOCKER.CHOCOLATE, BLOCKER.STONE];
+  for (const bt of blockerTypes) { const n = Math.floor(rng() * 5); if (n > 0) placeRandomBlockers(bl, bt, n); }
+  let goalData = {};
+  if (goal === GOAL.COLLECT) { goalData = { collectType: Math.floor(rng() * CANDY_TYPES), collectTarget: 20 + Math.floor(rng() * 20) }; }
+  else if (goal === GOAL.CLEAR_JELLY) { goalData = { jellyCount: 15 + Math.floor(rng() * 15) }; }
+  return { level: 0, moves: m, stars, blockers: bl, goal, goalData };
+}
 
 // ═══════════════════════════════════════════════════════
 // SECTION 8: INPUT HANDLING
@@ -1175,6 +1208,16 @@ function isBackButton(px, py) { return px < 100 && py < 55 && (state.screen === 
 function handleBoardClick(px, py) {
   if (state.animating || state.screen !== SCREEN.PLAYING) return;
 
+  // Check booster button click
+  if (state._boosterBtn) {
+    const bb = state._boosterBtn;
+    if (px >= bb.x && px <= bb.x + bb.w && py >= bb.y && py <= bb.y + bb.h) {
+      ensureAudio();
+      if (state.boosterCharges > 0) { state.boosterCharges--; state.movesLeft += 5; saveProgressLocal(); sfxSpecialCreate(); addFloatingText(W / 2, boardY * 0.7, '+5 Moves!', '#2ed573', Math.floor(cellSize * 0.4)); }
+      else { sfxBadSwap(); }
+      return;
+    }
+  }
   // Check hammer button click
   if (state._hammerBtn) {
     const hb = state._hammerBtn;
@@ -1250,8 +1293,14 @@ function getLevelSelectLayout() {
 
 function handleLevelSelectClick(px, py) {
   const { gc, bs, gx, gy, sx, sy } = getLevelSelectLayout();
+  // Daily Challenge button
+  const dailyY = sy + Math.ceil(ALL_LEVELS.length / gc) * (bs + gy) + 20;
+  const dailyW = 160, dailyH = 44, dailyX = (W - dailyW) / 2;
+  if (px >= dailyX && px <= dailyX + dailyW && py >= dailyY && py <= dailyY + dailyH) {
+    ensureAudio(); sfxClick(); startDailyChallenge(); return;
+  }
   // Leaderboard button
-  const lbY = sy + Math.ceil(30 / gc) * (bs + gy) + 20;
+  const lbY = dailyY + dailyH + 12;
   const lbW = 160, lbH = 44, lbX = (W - lbW) / 2;
   if (px >= lbX && px <= lbX + lbW && py >= lbY && py <= lbY + lbH) {
     ensureAudio(); sfxClick();
@@ -1264,7 +1313,7 @@ function handleLevelSelectClick(px, py) {
     const soY = lbY + lbH + 12;
     if (px >= lbX && px <= lbX + lbW && py >= soY && py <= soY + lbH) { ensureAudio(); sfxClick(); firebase.signOutUser(); state.screen = SCREEN.TITLE; return; }
   }
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < ALL_LEVELS.length; i++) {
     const row = Math.floor(i / gc), col = i % gc;
     const bx = sx + col * (bs + gx), by = sy + row * (bs + gy);
     if (px >= bx && px <= bx + bs && py >= by && py <= by + bs) {
@@ -1274,16 +1323,33 @@ function handleLevelSelectClick(px, py) {
   }
 }
 
+async function shareScore() {
+  const lvlName = state.dailyChallenge ? 'Daily Challenge' : `level ${state.level}`;
+  const text = `I scored ${state.score.toLocaleString()} on ${lvlName}! ${'★'.repeat(state.stars)} 🍬`;
+  const url = 'https://ensung-park.github.io/Games/sweet-match/';
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Sweet Match', text, url }); } catch(e) {}
+  } else {
+    try { await navigator.clipboard.writeText(text + ' ' + url); addFloatingText(W / 2, H / 2, 'Copied to clipboard!', '#2ed573', Math.floor(cellSize * 0.35)); } catch(e) {}
+  }
+}
+
 function handleOverlayClick(px, py) {
   const bw = 180, bh = 50, bx = (W - bw) / 2;
   if (state.screen === SCREEN.LEVEL_COMPLETE) {
-    const by1 = H * 0.58;
-    if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); if (state.level < 30) startLevel(state.level + 1); else state.screen = SCREEN.LEVEL_SELECT; return; }
-    if (px >= bx && px <= bx + bw && py >= by1 + bh + 14 && py <= by1 + bh * 2 + 14) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
+    const shareY = H * 0.55;
+    if (px >= bx && px <= bx + bw && py >= shareY && py <= shareY + bh) { ensureAudio(); sfxClick(); shareScore(); return; }
+    const by2 = shareY + bh + 10;
+    if (!state.dailyChallenge) {
+      if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); state.dailyChallenge = false; if (state.level < ALL_LEVELS.length) startLevel(state.level + 1); else state.screen = SCREEN.LEVEL_SELECT; return; }
+      if (px >= bx && px <= bx + bw && py >= by2 + bh + 10 && py <= by2 + bh * 2 + 10) { ensureAudio(); sfxClick(); state.dailyChallenge = false; state.screen = SCREEN.LEVEL_SELECT; return; }
+    } else {
+      if (px >= bx && px <= bx + bw && py >= by2 && py <= by2 + bh) { ensureAudio(); sfxClick(); state.dailyChallenge = false; state.screen = SCREEN.LEVEL_SELECT; return; }
+    }
   } else if (state.screen === SCREEN.LEVEL_FAILED) {
     const by1 = H * 0.55;
-    if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); startLevel(state.level); return; }
-    if (px >= bx && px <= bx + bw && py >= by1 + bh + 14 && py <= by1 + bh * 2 + 14) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; return; }
+    if (px >= bx && px <= bx + bw && py >= by1 && py <= by1 + bh) { ensureAudio(); sfxClick(); if (state.dailyChallenge) startDailyChallenge(); else startLevel(state.level); return; }
+    if (px >= bx && px <= bx + bw && py >= by1 + bh + 14 && py <= by1 + bh * 2 + 14) { ensureAudio(); sfxClick(); state.dailyChallenge = false; state.screen = SCREEN.LEVEL_SELECT; return; }
   }
 }
 
@@ -1305,8 +1371,8 @@ function pointerToCanvas(e) {
 
 function onPointerDown(e) {
   e.preventDefault(); const { x: px, y: py } = pointerToCanvas(e);
-  if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; if (!soundEnabled) stopBgMusic(); else if (state.screen === SCREEN.PLAYING) startBgMusic(); sfxClick(); return; }
-  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = []; stopBgMusic(); return; }
+  if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; try { localStorage.setItem('sweetMatchSound', soundEnabled); } catch(e) {} if (!soundEnabled) stopBgMusic(); else if (state.screen === SCREEN.PLAYING) startBgMusic(); sfxClick(); return; }
+  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = []; state.dailyChallenge = false; stopBgMusic(); return; }
   if (state.screen === SCREEN.GOAL_PREVIEW) { state.screen = SCREEN.PLAYING; return; }
   if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
   if (state.screen === SCREEN.LEVEL_SELECT) { handleLevelSelectClick(px, py); return; }
@@ -1381,13 +1447,13 @@ function drawLevelSelect() {
   ctx.fillText(firebase.user ? firebase.user.displayName || 'Player' : 'Guest', W / 2, H * 0.13);
 
   const { gc, bs, gx, gy, sx, sy } = getLevelSelectLayout();
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < ALL_LEVELS.length; i++) {
     const row = Math.floor(i / gc), col = i % gc, bx = sx + col * (bs + gx), by = sy + row * (bs + gy);
     const ln = i + 1, se = state.progress[ln] || 0, unlocked = ln === 1 || (state.progress[ln - 1] && state.progress[ln - 1] >= 1);
 
     if (unlocked) {
-      const tier = ln <= 10 ? 0 : ln <= 20 ? 1 : 2;
-      const tc = [['#2ed573', '#009432'], ['#ffa502', '#cc7700'], ['#ff4757', '#c44569']];
+      const tier = ln <= 10 ? 0 : ln <= 20 ? 1 : ln <= 30 ? 2 : ln <= 40 ? 3 : 4;
+      const tc = [['#2ed573', '#009432'], ['#ffa502', '#cc7700'], ['#ff4757', '#c44569'], ['#a55eea', '#8854d0'], ['#1e90ff', '#0652DD']];
       const bg = ctx.createLinearGradient(bx, by, bx + bs, by + bs); bg.addColorStop(0, tc[tier][0]); bg.addColorStop(1, tc[tier][1]); ctx.fillStyle = bg;
     } else ctx.fillStyle = 'rgba(255,255,255,0.08)';
     drawRoundedRect(bx, by, bs, bs, 10); ctx.fill();
@@ -1400,8 +1466,16 @@ function drawLevelSelect() {
     if (se > 0) { ctx.font = `${Math.floor(bs * 0.22)}px sans-serif`; ctx.textBaseline = 'top'; ctx.fillStyle = '#ffa502'; ctx.fillText('★'.repeat(se) + '☆'.repeat(3 - se), bx + bs / 2, by + bs + 2); }
   }
 
+  // Daily Challenge button
+  const dailyY = sy + Math.ceil(ALL_LEVELS.length / gc) * (bs + gy) + 20;
+  const dailyW = 160, dailyH = 44, dailyX = (W - dailyW) / 2;
+  const dPulse = 0.8 + 0.2 * Math.sin(performance.now() * 0.003);
+  ctx.globalAlpha = dPulse;
+  drawBtn('DAILY', dailyX, dailyY, dailyW, dailyH, true);
+  ctx.globalAlpha = 1;
+
   // Leaderboard button
-  const lbY = sy + Math.ceil(30 / gc) * (bs + gy) + 20;
+  const lbY = dailyY + dailyH + 12;
   const lbW = 160, lbH = 44, lbX = (W - lbW) / 2;
   drawBtn('Leaderboard', lbX, lbY, lbW, lbH, false);
 
@@ -1494,6 +1568,19 @@ function drawHammerButton() {
 
   // Store hammer button position for click detection
   state._hammerBtn = { x: hx, y: hy, w: bsz, h: bsz };
+
+  // +5 Moves booster button (near moves counter)
+  const boostW = Math.floor(cellSize * 1.2), boostH = Math.floor(cellSize * 0.5);
+  const boostX = W / 2 + Math.floor(cellSize * 1.5), boostYPos = Math.floor(boardY * 0.58);
+  const hasCharges = state.boosterCharges > 0;
+  ctx.fillStyle = hasCharges ? 'rgba(46,213,115,0.2)' : 'rgba(255,255,255,0.05)';
+  drawRoundedRect(boostX, boostYPos, boostW, boostH, boostH / 2); ctx.fill();
+  if (hasCharges) { ctx.strokeStyle = 'rgba(46,213,115,0.5)'; ctx.lineWidth = 1; drawRoundedRect(boostX, boostYPos, boostW, boostH, boostH / 2); ctx.stroke(); }
+  ctx.font = `bold ${Math.floor(boostH * 0.45)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = hasCharges ? '#2ed573' : '#555';
+  ctx.fillText(`+5 (${state.boosterCharges})`, boostX + boostW / 2, boostYPos + boostH / 2);
+  state._boosterBtn = { x: boostX, y: boostYPos, w: boostW, h: boostH };
 }
 
 function drawGoalProgress() {
@@ -1510,9 +1597,7 @@ function drawGoalProgress() {
     ctx.fillStyle = COLORS[gp.collectType % CANDY_TYPES].main;
     ctx.fillText(`Collected: ${gp.collected || 0} / ${gp.target}`, W / 2, y);
   } else if (ld.goal === GOAL.CLEAR_CHOCOLATE) {
-    let chocLeft = 0;
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) chocLeft++;
-    ctx.fillStyle = '#7b4a2b'; ctx.fillText(`Chocolate left: ${chocLeft}`, W / 2, y);
+    ctx.fillStyle = '#7b4a2b'; ctx.fillText(`Chocolate left: ${state.goalProgress.chocolateLeft || 0}`, W / 2, y);
   }
 }
 
@@ -1525,7 +1610,7 @@ function drawGoalPreview() {
   const tg = ctx.createLinearGradient(W / 2 - 80, 0, W / 2 + 80, 0);
   tg.addColorStop(0, '#ff6bca'); tg.addColorStop(0.5, '#ffb347'); tg.addColorStop(1, '#ff6bca');
   ctx.fillStyle = tg; ctx.font = `bold ${Math.floor(cellSize * 0.7)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText(`Level ${state.level}`, W / 2, H * 0.25);
+  ctx.fillText(state.dailyChallenge ? 'Daily Challenge' : `Level ${state.level}`, W / 2, H * 0.25);
 
   // Goal text
   ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.4)}px 'Segoe UI', system-ui, sans-serif`;
@@ -1543,10 +1628,10 @@ function drawGoalPreview() {
   ctx.fillStyle = '#ffb347'; ctx.font = `${Math.floor(cellSize * 0.25)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillText('🔨 Tap the hammer to destroy any candy!', W / 2, H * 0.66);
 
-  // Countdown
-  const secs = Math.ceil(state.goalPreviewTimer);
-  ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = `${Math.floor(cellSize * 0.3)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText(`Starting in ${secs}...`, W / 2, H * 0.78);
+  // Tap to start
+  const tapPulse = 0.4 + 0.3 * Math.sin(performance.now() * 0.004);
+  ctx.fillStyle = `rgba(255,255,255,${tapPulse})`; ctx.font = `bold ${Math.floor(cellSize * 0.32)}px 'Segoe UI', system-ui, sans-serif`;
+  ctx.fillText('Tap anywhere to start', W / 2, H * 0.78);
 }
 
 function drawLevelComplete() {
@@ -1569,9 +1654,15 @@ function drawLevelComplete() {
     ctx.fillText('Sign in to save progress to cloud!', W / 2, by + 200);
   }
 
-  const btnW = 180, btnH = 50, btnX = (W - btnW) / 2, btnY1 = H * 0.58;
-  drawBtn(state.level < 30 ? 'Next Level' : 'All Done!', btnX, btnY1, btnW, btnH, true);
-  drawBtn('Level Select', btnX, btnY1 + btnH + 14, btnW, btnH, false);
+  const btnW = 180, btnH = 50, btnX = (W - btnW) / 2, btnY1 = H * 0.55;
+  drawBtn('Share 📤', btnX, btnY1, btnW, btnH, false);
+  const btnY2 = btnY1 + btnH + 10;
+  if (!state.dailyChallenge) {
+    drawBtn(state.level < ALL_LEVELS.length ? 'Next Level' : 'All Done!', btnX, btnY2, btnW, btnH, true);
+    drawBtn('Level Select', btnX, btnY2 + btnH + 10, btnW, btnH, false);
+  } else {
+    drawBtn('Level Select', btnX, btnY2, btnW, btnH, true);
+  }
 }
 
 function drawLevelFailed() {
@@ -1602,7 +1693,7 @@ function startLevel(n) {
     level: n, levelData: ld, score: 0, movesLeft: ld.moves, totalMoves: ld.moves,
     selected: null, animating: false, cascade: 0, hintTimer: 0, hintMove: null,
     particles: [], floatingTexts: [], tweens: [], shakeAmount: 0, shakeTime: 0,
-    stars: 0, bonusPhase: false,
+    stars: 0, bonusPhase: false, dailyChallenge: false,
     goalType: ld.goal || GOAL.SCORE,
     goalProgress: {},
     hammerAvailable: true, hammerActive: false,
@@ -1652,6 +1743,43 @@ function startLevel(n) {
       let att2 = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att2 < 150) { createBoard(tmpLd); att2++; }
       chocCount = toAdd;
     }
+    state.goalProgress = { chocolateLeft: chocCount };
+  }
+}
+
+function startDailyChallenge() {
+  const ld = generateDailyLevel();
+  Object.assign(state, {
+    level: 0, levelData: ld, score: 0, movesLeft: ld.moves, totalMoves: ld.moves,
+    selected: null, animating: false, cascade: 0, hintTimer: 0, hintMove: null,
+    particles: [], floatingTexts: [], tweens: [], shakeAmount: 0, shakeTime: 0,
+    stars: 0, bonusPhase: false, dailyChallenge: true,
+    goalType: ld.goal || GOAL.SCORE,
+    goalProgress: {},
+    hammerAvailable: true, hammerActive: false,
+    jellyBoard: null,
+    goalPreviewTimer: 3.0,
+    screen: SCREEN.GOAL_PREVIEW,
+    levelGen: state.levelGen + 1,
+  });
+  // Use date seed for board randomness
+  const dailyRng = seededRng(getDailySeed() + 1);
+  const origRandom = Math.random;
+  Math.random = dailyRng;
+  createBoard(ld);
+  let att = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att < 150) { createBoard(ld); att++; }
+  Math.random = origRandom;
+  ensureAudio(); startBgMusic();
+  if (ld.goal === GOAL.CLEAR_JELLY) {
+    state.jellyBoard = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+    let placed = 0, attempts = 0; const target = ld.goalData.jellyCount || 15;
+    while (placed < target && attempts < 500) { const r = Math.floor(Math.random() * ROWS), c = Math.floor(Math.random() * COLS); if (state.jellyBoard[r][c] === 0 && isPlayable(r, c)) { state.jellyBoard[r][c] = (placed < target / 3) ? 2 : 1; placed++; } attempts++; }
+    state.goalProgress = { jellyLeft: placed };
+  } else if (ld.goal === GOAL.COLLECT) {
+    state.goalProgress = { collected: 0, target: ld.goalData.collectTarget, collectType: ld.goalData.collectType };
+  } else if (ld.goal === GOAL.CLEAR_CHOCOLATE) {
+    let chocCount = 0; for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (state.board[r][c].blocker === BLOCKER.CHOCOLATE) chocCount++;
+    if (chocCount === 0) { const toAdd = 5; const blCopy = ld.blockers.map(row => [...row]); placeRandomBlockers(blCopy, BLOCKER.CHOCOLATE, toAdd); const tmpLd = { ...ld, blockers: blCopy }; createBoard(tmpLd); let att2 = 0; while ((findAllMatchedCells().length > 0 || !hasValidMoves()) && att2 < 150) { createBoard(tmpLd); att2++; } chocCount = toAdd; }
     state.goalProgress = { chocolateLeft: chocCount };
   }
 }
@@ -1706,10 +1834,18 @@ function gameLoop(time) {
   }
 
   // Moves counter pulse when low
-  if (state.screen === SCREEN.PLAYING && state.movesLeft <= 3 && state.movesLeft > 0 && !state.animating) {
+  if (state.screen === SCREEN.PLAYING && state.movesLeft <= 5 && state.movesLeft > 0 && !state.animating) {
     const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.01);
     ctx.fillStyle = `rgba(255,71,87,${pulse * 0.15})`;
     ctx.fillRect(0, 0, W, boardY);
+    // Redraw moves text with pulse/scale
+    const sc = 1 + 0.1 * Math.sin(performance.now() * 0.008);
+    ctx.save(); ctx.translate(W / 2, boardY * 0.7); ctx.scale(sc, sc);
+    ctx.font = `bold ${Math.floor(cellSize * 0.32)}px 'Segoe UI', system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = `rgba(255,71,87,${0.7 + pulse * 0.3})`;
+    ctx.fillText(`${state.movesLeft} moves left`, 0, 0);
+    ctx.restore();
   }
 
   // Sound toggle
