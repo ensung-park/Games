@@ -1179,7 +1179,7 @@ async function checkLevelEnd() {
 
   if (state.movesLeft <= 0) {
     if (isGoalMet()) { await showWin(); }
-    else { stopBgMusic(); state.screen = SCREEN.LEVEL_FAILED; sfxLose(); }
+    else { stopBgMusic(); state.screen = SCREEN.LEVEL_FAILED; state.loseAnimTime = 0; state.loseCandies = Array.from({length: 5}, (_, i) => ({ x: W * 0.3 + i * W * 0.1, y: -30 - i * 20, vy: 0, rot: 0, rotSpeed: (Math.random() - 0.5) * 3, type: Math.floor(Math.random() * CANDY_TYPES), alpha: 1 })); sfxLose(); }
     return;
   }
   if (!hasValidMoves()) { shuffleBoard(); addFloatingText(W / 2, H / 2, 'SHUFFLE!', '#ffb347', Math.floor(cellSize * 0.6)); if (!hasValidMoves()) shuffleBoard(); }
@@ -1758,14 +1758,36 @@ function drawLevelComplete() {
 }
 
 function drawLevelFailed() {
+  if (state.loseAnimTime !== undefined) state.loseAnimTime += 1 / 60;
+  const lat = state.loseAnimTime || 0;
+
   ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
+
+  // Falling/drooping candy icons
+  if (state.loseCandies) {
+    for (const lc of state.loseCandies) {
+      lc.vy += 180 * (1 / 60); // gravity
+      lc.y += lc.vy * (1 / 60);
+      lc.rot += lc.rotSpeed * (1 / 60);
+      if (lc.y > H * 0.6) lc.alpha = Math.max(0, lc.alpha - 1.5 * (1 / 60));
+      if (lc.alpha > 0) {
+        ctx.save(); ctx.globalAlpha = lc.alpha; ctx.translate(lc.x, lc.y); ctx.rotate(lc.rot);
+        drawCandy(0, 0, cellSize * 0.6, lc.type, SPECIAL.NONE);
+        ctx.restore(); ctx.globalAlpha = 1;
+      }
+    }
+  }
+
   const bw = Math.min(W * 0.82, 360), bh = 220, bx = (W - bw) / 2, by = H * 0.25;
   const g = ctx.createLinearGradient(bx, by, bx + bw, by + bh); g.addColorStop(0, '#2d1b69'); g.addColorStop(1, '#4a1a6b');
   ctx.fillStyle = g; drawRoundedRect(bx, by, bw, bh, 20); ctx.fill();
 
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // Title drops in with bounce
+  const dropT = Math.min(lat / 0.5, 1);
+  const bounceY = dropT < 1 ? by + 48 - (1 - dropT) * 80 + Math.sin(dropT * Math.PI) * 10 : by + 48;
   ctx.fillStyle = '#ff4757'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText('Out of Moves!', W / 2, by + 48);
+  ctx.fillText('Out of Moves!', W / 2, bounceY);
   ctx.fillStyle = '#ccc'; ctx.font = `${Math.floor(cellSize * 0.33)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillText(`Score: ${state.score.toLocaleString()}`, W / 2, by + 95);
   ctx.fillStyle = '#888'; ctx.fillText(`Need ${state.levelData.stars[0].toLocaleString()} to pass`, W / 2, by + 130);
