@@ -1152,7 +1152,7 @@ async function showWin() {
   const prev = state.progress[state.level] || 0;
   if (es === 3 && state.boosterCharges < 3) { state.boosterCharges++; }
   if (es > prev) { state.progress[state.level] = es; await saveProgress(); } else { saveProgressLocal(); }
-  stopBgMusic(); state.screen = SCREEN.LEVEL_COMPLETE; sfxWin();
+  stopBgMusic(); state.screen = SCREEN.LEVEL_COMPLETE; state.winAnimTime = 0; state.winFinalScore = state.score; sfxWin();
   // Fireworks celebration
   addConfetti(W / 2, H * 0.35, 50);
   addConfetti(W * 0.3, H * 0.4, 25);
@@ -1699,6 +1699,12 @@ function drawGoalPreview() {
 }
 
 function drawLevelComplete() {
+  if (state.winAnimTime !== undefined) state.winAnimTime += 1 / 60;
+  const wat = state.winAnimTime || 0;
+
+  // Persistent confetti shower
+  if (wat < 4 && Math.random() < 0.3) addConfetti(Math.random() * W, -10, 2);
+
   ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
   const bw = Math.min(W * 0.82, 360), bh = 280, bx = (W - bw) / 2, by = H * 0.2;
   const g = ctx.createLinearGradient(bx, by, bx + bw, by + bh); g.addColorStop(0, '#2d1b69'); g.addColorStop(1, '#4a1a6b');
@@ -1707,10 +1713,32 @@ function drawLevelComplete() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillStyle = '#2ed573'; ctx.font = `bold ${Math.floor(cellSize * 0.55)}px 'Segoe UI', system-ui, sans-serif`;
   ctx.fillText('Level Complete!', W / 2, by + 48);
+
+  // Score count-up
+  const countT = Math.min(wat / 1.5, 1);
+  const easedCount = 1 - (1 - countT) * (1 - countT) * (1 - countT);
+  const displayScore = Math.floor((state.winFinalScore || state.score) * easedCount);
   ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(cellSize * 0.5)}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.fillText(state.score.toLocaleString(), W / 2, by + 100);
-  ctx.font = `${Math.floor(cellSize * 0.65)}px sans-serif`; ctx.fillStyle = '#ffa502';
-  ctx.fillText('★'.repeat(state.stars) + '☆'.repeat(3 - state.stars), W / 2, by + 160);
+  ctx.fillText(displayScore.toLocaleString(), W / 2, by + 100);
+
+  // Stars appear one by one with burst animation
+  ctx.font = `${Math.floor(cellSize * 0.65)}px sans-serif`;
+  const starTimes = [0.3, 0.6, 0.9];
+  let starStr = '';
+  for (let i = 0; i < 3; i++) {
+    if (i < state.stars && wat >= starTimes[i]) {
+      const starAge = wat - starTimes[i];
+      const bounceT = Math.min(starAge / 0.3, 1);
+      const sc = bounceT < 0.5 ? 2 - bounceT * 2 : 1 + (bounceT - 0.5) * 0.3 * Math.sin(bounceT * 8);
+      const finalSc = bounceT >= 1 ? 1 : sc;
+      ctx.save(); ctx.translate(W / 2 + (i - 1) * cellSize * 0.55, by + 160);
+      ctx.scale(finalSc, finalSc); ctx.fillStyle = '#ffa502';
+      ctx.fillText('★', 0, 0); ctx.restore();
+    } else {
+      ctx.save(); ctx.translate(W / 2 + (i - 1) * cellSize * 0.55, by + 160);
+      ctx.fillStyle = '#555'; ctx.fillText('☆', 0, 0); ctx.restore();
+    }
+  }
 
   // Sign in prompt for guests
   if (!firebase.user) {
