@@ -665,14 +665,13 @@ function drawBoard() {
   const sx = shk ? Math.sin(state.shakeTime * 40) * shk : 0;
   const sy = shk ? Math.cos(state.shakeTime * 35) * shk * 0.7 : 0;
 
-  // Multi-layer shadow
+  // Board background + border (no shadowBlur — too expensive on mobile)
   const bRx = boardX - 10 + sx, bRy = boardY - 10 + sy, bRw = cellSize * COLS + 20, bRh = cellSize * ROWS + 20;
-  for (const blur of [40, 20, 8]) { ctx.save(); ctx.shadowColor = 'rgba(180,100,255,0.3)'; ctx.shadowBlur = blur; ctx.fillStyle = 'rgba(0,0,0,0.01)'; drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.fill(); ctx.restore(); }
-  ctx.fillStyle = 'rgba(0,0,0,0.3)'; drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.fill();
-  // Glowing border
-  ctx.save(); const borderGrad = ctx.createLinearGradient(bRx, bRy, bRx + bRw, bRy + bRh); borderGrad.addColorStop(0, '#ff6bca'); borderGrad.addColorStop(1, '#a55eea');
-  ctx.strokeStyle = borderGrad; ctx.lineWidth = 2; ctx.shadowColor = '#a55eea'; ctx.shadowBlur = 12;
-  drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.stroke(); ctx.restore();
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.fill();
+  const borderGrad = ctx.createLinearGradient(bRx, bRy, bRx + bRw, bRy + bRh);
+  borderGrad.addColorStop(0, '#ff6bca'); borderGrad.addColorStop(1, '#a55eea');
+  ctx.strokeStyle = borderGrad; ctx.lineWidth = 2;
+  drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.stroke();
 
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
@@ -692,16 +691,21 @@ function drawBoard() {
         const sc = (cell.scale !== undefined ? cell.scale : 1) * rsc;
         const al = cell.alpha !== undefined ? cell.alpha : 1;
         if (al <= 0.01) continue;
-        // Glow for selected candy
+        // Glow for selected/hinted candy (lightweight: no shadowBlur on every cell)
         const isSel = state.selected && state.selected.r === r && state.selected.c === c && state.screen === SCREEN.PLAYING;
-        if (isSel) { const col = COLORS[cell.type % CANDY_TYPES]; ctx.shadowColor = col.light; ctx.shadowBlur = 18; }
-        // Glow for hinted candies
         const isHint = state.hintMove && !state.selected && !state.animating && state.screen === SCREEN.PLAYING &&
           ((state.hintMove.r === r && state.hintMove.c === c) || (state.hintMove.r2 === r && state.hintMove.c2 === c));
-        if (isHint) { const col = COLORS[cell.type % CANDY_TYPES]; ctx.shadowColor = col.light; ctx.shadowBlur = 8 + 12 * (0.5 + 0.5 * Math.sin(performance.now() * 0.006)); }
         if (cell.special === SPECIAL.COLOR_BOMB) drawColorBomb(dx, dy, cellSize * sc, al);
         else drawCandy(dx, dy, cellSize * sc, cell.type, cell.special, al);
-        if (isSel || isHint) ctx.shadowBlur = 0;
+        // Draw selection/hint ring instead of shadowBlur (much cheaper)
+        if (isSel) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 2.5;
+          drawRoundedRect(dx - cellSize/2*sc + 1, dy - cellSize/2*sc + 1, cellSize*sc - 2, cellSize*sc - 2, 7); ctx.stroke();
+        } else if (isHint) {
+          const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
+          ctx.strokeStyle = `rgba(255,255,255,${0.4 + pulse * 0.5})`; ctx.lineWidth = 2;
+          drawRoundedRect(dx - cellSize/2*sc + 1, dy - cellSize/2*sc + 1, cellSize*sc - 2, cellSize*sc - 2, 7); ctx.stroke();
+        }
       }
       if (cell.blocker === BLOCKER.ICE1 || cell.blocker === BLOCKER.ICE2) drawBlocker(cx, cy, cellSize, cell.blocker);
     }
@@ -711,8 +715,8 @@ function drawBoard() {
   if (state.selected && state.screen === SCREEN.PLAYING) {
     const p = cellToScreen(state.selected.r, state.selected.c);
     const pulse = 0.7 + 0.3 * Math.sin(performance.now() * 0.008);
-    ctx.strokeStyle = `rgba(255,255,255,${pulse})`; ctx.lineWidth = 2.5; ctx.shadowColor = '#fff'; ctx.shadowBlur = 10;
-    drawRoundedRect(p.x - cellSize / 2 + 3 + sx, p.y - cellSize / 2 + 3 + sy, cellSize - 6, cellSize - 6, 7); ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.strokeStyle = `rgba(255,255,255,${pulse})`; ctx.lineWidth = 2.5;
+    drawRoundedRect(p.x - cellSize / 2 + 3 + sx, p.y - cellSize / 2 + 3 + sy, cellSize - 6, cellSize - 6, 7); ctx.stroke();
   }
 
   // Hint (bounce/pulse animation)
@@ -1555,10 +1559,8 @@ function drawTitleBgCandies() {
     ctx.save();
     ctx.globalAlpha = 0.18;
     ctx.translate(x, y); ctx.rotate(rot);
-    ctx.shadowColor = col.main; ctx.shadowBlur = 8;
     drawCandyShape(0, 0, cellSize * sizeScale, i % CANDY_TYPES);
     ctx.fillStyle = col.main; ctx.fill();
-    ctx.shadowBlur = 0;
     ctx.restore();
   }
   ctx.globalAlpha = 1;
