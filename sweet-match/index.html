@@ -622,7 +622,14 @@ function drawBoard() {
   const sx = shk ? Math.sin(state.shakeTime * 40) * shk : 0;
   const sy = shk ? Math.cos(state.shakeTime * 35) * shk * 0.7 : 0;
 
-  ctx.fillStyle = 'rgba(0,0,0,0.3)'; drawRoundedRect(boardX - 10 + sx, boardY - 10 + sy, cellSize * COLS + 20, cellSize * ROWS + 20, 16); ctx.fill();
+  // Multi-layer shadow
+  const bRx = boardX - 10 + sx, bRy = boardY - 10 + sy, bRw = cellSize * COLS + 20, bRh = cellSize * ROWS + 20;
+  for (const blur of [40, 20, 8]) { ctx.save(); ctx.shadowColor = 'rgba(180,100,255,0.3)'; ctx.shadowBlur = blur; ctx.fillStyle = 'rgba(0,0,0,0.01)'; drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.fill(); ctx.restore(); }
+  ctx.fillStyle = 'rgba(0,0,0,0.3)'; drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.fill();
+  // Glowing border
+  ctx.save(); const borderGrad = ctx.createLinearGradient(bRx, bRy, bRx + bRw, bRy + bRh); borderGrad.addColorStop(0, '#ff6bca'); borderGrad.addColorStop(1, '#a55eea');
+  ctx.strokeStyle = borderGrad; ctx.lineWidth = 2; ctx.shadowColor = '#a55eea'; ctx.shadowBlur = 12;
+  drawRoundedRect(bRx, bRy, bRw, bRh, 16); ctx.stroke(); ctx.restore();
 
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
