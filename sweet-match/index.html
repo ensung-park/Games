@@ -1505,8 +1505,19 @@ function pointerToCanvas(e) {
   return { x: (e.clientX - rect.left) * (W / rect.width), y: (e.clientY - rect.top) * (H / rect.height) };
 }
 
+let _lastTapTime = 0, _tapWhileAnimating = 0;
 function onPointerDown(e) {
   e.preventDefault(); const { x: px, y: py } = pointerToCanvas(e);
+  // Safety: if animating for too long and user taps, force-unlock
+  if (state.animating && state.screen === SCREEN.PLAYING) {
+    const now = Date.now();
+    if (!_lastTapTime) _lastTapTime = now;
+    if (now - _lastTapTime > 1500) {
+      console.warn('Force-unlock: animating stuck, resetting on tap');
+      state.animating = false; state.tweens = []; state.selected = null; state.bonusPhase = false;
+      _lastTapTime = 0;
+    }
+  } else { _lastTapTime = 0; }
   if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; try { localStorage.setItem('sweetMatchSound', soundEnabled); } catch(e) {} if (!soundEnabled) stopBgMusic(); else if (state.screen === SCREEN.PLAYING) startBgMusic(); sfxClick(); return; }
   if (state._cbBtnGame) { const cb = state._cbBtnGame; if (px >= cb.x && px <= cb.x + cb.w && py >= cb.y && py <= cb.y + cb.h) { state.colorBlindMode = !state.colorBlindMode; try { localStorage.setItem('sweetMatchColorBlind', state.colorBlindMode); } catch(e) {} sfxClick(); return; } }
   if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = []; state.dailyChallenge = false; stopBgMusic(); return; }
@@ -2168,23 +2179,37 @@ onAuthStateChanged(auth, async (user) => {
 });
 
 // ── Animating watchdog ────────────────────────────────────────────────────
-// If state.animating gets stuck true for >3s while on PLAYING screen,
-// force-reset it so the game doesn't stay frozen.
+// If state.animating gets stuck true for >1.5s, force-reset it.
 let _animWatchdogStart = 0;
 setInterval(() => {
-  if (state.screen === SCREEN.PLAYING && state.animating) {
+  if (state.animating) {
     const now = Date.now();
     if (!_animWatchdogStart) { _animWatchdogStart = now; return; }
-    if (now - _animWatchdogStart > 3000) {
-      console.warn('Watchdog: force-resetting stuck state.animating');
+    if (now - _animWatchdogStart > 1500) {
+      console.warn('Watchdog: force-resetting stuck state.animating after', now - _animWatchdogStart, 'ms');
       state.animating = false;
+      state.bonusPhase = false;
       state.tweens = [];
+      state.selected = null;
       _animWatchdogStart = 0;
     }
   } else {
     _animWatchdogStart = 0;
   }
-}, 500);
+}, 250);
+
+// ── Global unhandled rejection catcher ───────────────────────────────────
+// Any uncaught async error will be caught here and animating reset.
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('Unhandled promise rejection (possible lockup cause):', e.reason);
+  if (state.animating) {
+    state.animating = false;
+    state.bonusPhase = false;
+    state.tweens = [];
+    state.selected = null;
+    console.warn('Animating reset by unhandledrejection handler');
+  }
+});
 
 </script>
 </body>
