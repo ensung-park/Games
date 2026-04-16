@@ -1,0 +1,9 @@
+{
+  "name": "Sweet Match",
+  "short_name": "Sweet",
+  "theme_color": "#1a0533",
+  "background_color": "#1a0533",
+  "display": "standalone",
+  "start_url": "./",
+  "icons": []
+}
