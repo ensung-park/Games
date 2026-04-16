@@ -641,8 +641,16 @@ function drawBoard() {
         const sc = cell.scale !== undefined ? cell.scale : 1;
         const al = cell.alpha !== undefined ? cell.alpha : 1;
         if (al <= 0.01) continue;
+        // Glow for selected candy
+        const isSel = state.selected && state.selected.r === r && state.selected.c === c && state.screen === SCREEN.PLAYING;
+        if (isSel) { const col = COLORS[cell.type % CANDY_TYPES]; ctx.shadowColor = col.light; ctx.shadowBlur = 18; }
+        // Glow for hinted candies
+        const isHint = state.hintMove && !state.selected && !state.animating && state.screen === SCREEN.PLAYING &&
+          ((state.hintMove.r === r && state.hintMove.c === c) || (state.hintMove.r2 === r && state.hintMove.c2 === c));
+        if (isHint) { const col = COLORS[cell.type % CANDY_TYPES]; ctx.shadowColor = col.light; ctx.shadowBlur = 8 + 12 * (0.5 + 0.5 * Math.sin(performance.now() * 0.006)); }
         if (cell.special === SPECIAL.COLOR_BOMB) drawColorBomb(dx, dy, cellSize * sc, al);
         else drawCandy(dx, dy, cellSize * sc, cell.type, cell.special, al);
+        if (isSel || isHint) ctx.shadowBlur = 0;
       }
       if (cell.blocker === BLOCKER.ICE1 || cell.blocker === BLOCKER.ICE2) drawBlocker(cx, cy, cellSize, cell.blocker);
     }
