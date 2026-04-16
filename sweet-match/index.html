@@ -226,6 +226,7 @@ const state = {
   dailyChallenge: false,
   boosterCharges: 0,
   transition: null, // { from, to, progress, duration }
+  colorBlindMode: (() => { try { return localStorage.getItem('sweetMatchColorBlind') === 'true'; } catch(e) { return false; } })(),
 };
 
 function transitionTo(screen) {
@@ -603,6 +604,13 @@ function drawCandy(x, y, size, type, special, alpha) {
   if (special === SPECIAL.STRIPED_H) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; const shimmer = Math.sin(now * 0.005) * r * 0.06; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x - r * 0.65, y + i * r * 0.22 + shimmer); ctx.lineTo(x + r * 0.65, y + i * r * 0.22 + shimmer); ctx.stroke(); } }
   else if (special === SPECIAL.STRIPED_V) { ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5; const shimmer = Math.sin(now * 0.005) * r * 0.06; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x + i * r * 0.22 + shimmer, y - r * 0.65); ctx.lineTo(x + i * r * 0.22 + shimmer, y + r * 0.65); ctx.stroke(); } }
   else if (special === SPECIAL.WRAPPED) { const pulseR = 0.55 + 0.1 * Math.sin(now * 0.004); ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r * pulseR, 0, Math.PI * 2); ctx.stroke(); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, r * (pulseR - 0.25), 0, Math.PI * 2); ctx.stroke(); }
+  // Color-blind mode letter
+  if (state.colorBlindMode) {
+    const cbLetters = ['R', 'O', 'G', 'B', 'P', 'H'];
+    ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.floor(r * 0.7)}px 'Segoe UI', system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(cbLetters[type] || '?', x, y);
+  }
   // Orbiting sparkle dots for specials
   if (special !== SPECIAL.NONE && special !== SPECIAL.COLOR_BOMB) {
     const sparkCount = 3, orbitR = r * 0.75;
@@ -1438,6 +1446,15 @@ function handleOverlayClick(px, py) {
 }
 
 function handleTitleClick(px, py) {
+  // Color-blind toggle
+  if (state._cbBtn) {
+    const cb = state._cbBtn;
+    if (px >= cb.x && px <= cb.x + cb.w && py >= cb.y && py <= cb.y + cb.h) {
+      state.colorBlindMode = !state.colorBlindMode;
+      try { localStorage.setItem('sweetMatchColorBlind', state.colorBlindMode); } catch(e) {}
+      sfxClick(); return;
+    }
+  }
   const bw = 220, bh = 54, bx = (W - bw) / 2;
   // Sign in with Google
   const by1 = H * 0.52;
@@ -1456,6 +1473,7 @@ function pointerToCanvas(e) {
 function onPointerDown(e) {
   e.preventDefault(); const { x: px, y: py } = pointerToCanvas(e);
   if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; try { localStorage.setItem('sweetMatchSound', soundEnabled); } catch(e) {} if (!soundEnabled) stopBgMusic(); else if (state.screen === SCREEN.PLAYING) startBgMusic(); sfxClick(); return; }
+  if (state._cbBtnGame) { const cb = state._cbBtnGame; if (px >= cb.x && px <= cb.x + cb.w && py >= cb.y && py <= cb.y + cb.h) { state.colorBlindMode = !state.colorBlindMode; try { localStorage.setItem('sweetMatchColorBlind', state.colorBlindMode); } catch(e) {} sfxClick(); return; } }
   if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = []; state.dailyChallenge = false; stopBgMusic(); return; }
   if (state.screen === SCREEN.GOAL_PREVIEW) { state.screen = SCREEN.PLAYING; return; }
   if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
@@ -1525,6 +1543,14 @@ function drawTitleScreen() {
   drawBtn('Play as Guest', bx, H * 0.52 + bh + 16, bw, bh, false);
 
   if (!firebase.ready) { ctx.fillStyle = '#888'; ctx.font = `${Math.floor(cellSize * 0.25)}px sans-serif`; ctx.fillText('Connecting...', W / 2, H * 0.82); }
+
+  // Color-blind toggle button
+  const cbW = 50, cbH = 28, cbX = W - cbW - 12, cbY = H - cbH - 12;
+  ctx.fillStyle = state.colorBlindMode ? 'rgba(46,213,115,0.3)' : 'rgba(255,255,255,0.08)';
+  drawRoundedRect(cbX, cbY, cbW, cbH, cbH / 2); ctx.fill();
+  ctx.fillStyle = state.colorBlindMode ? '#2ed573' : '#888'; ctx.font = `bold ${Math.floor(cbH * 0.45)}px sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('CB', cbX + cbW / 2, cbY + cbH / 2);
+  state._cbBtn = { x: cbX, y: cbY, w: cbW, h: cbH };
 }
 
 function drawLevelSelect() {
@@ -2026,6 +2052,15 @@ function gameLoop(time) {
   // Sound toggle
   ctx.font = `${Math.floor(cellSize * 0.38)}px sans-serif`; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
   ctx.fillStyle = '#fff'; ctx.fillText(soundEnabled ? '🔊' : '🔇', W - 12, 10);
+  // Color-blind toggle (gameplay)
+  if (state.screen === SCREEN.PLAYING || state.screen === SCREEN.TITLE || state.screen === SCREEN.LEVEL_SELECT) {
+    const cbW2 = 36, cbH2 = 22, cbX2 = W - cbW2 - 12, cbY2 = 42;
+    ctx.fillStyle = state.colorBlindMode ? 'rgba(46,213,115,0.3)' : 'rgba(255,255,255,0.06)';
+    drawRoundedRect(cbX2, cbY2, cbW2, cbH2, cbH2 / 2); ctx.fill();
+    ctx.fillStyle = state.colorBlindMode ? '#2ed573' : '#666'; ctx.font = `bold ${Math.floor(cbH2 * 0.5)}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('CB', cbX2 + cbW2 / 2, cbY2 + cbH2 / 2);
+    state._cbBtnGame = { x: cbX2, y: cbY2, w: cbW2, h: cbH2 };
+  }
   requestAnimationFrame(gameLoop);
 }
 
