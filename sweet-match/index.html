@@ -993,6 +993,7 @@ async function animateNewTiles(tiles) {
 async function processMatches() {
   let cascade = 0, clearedChoc = false;
   const gen = state.levelGen; // capture current generation
+  try {
   while (true) {
     if (state.levelGen !== gen) return; // level changed, abort
     if (state.screen !== SCREEN.PLAYING && state.screen !== SCREEN.LEVEL_COMPLETE && state.screen !== SCREEN.LEVEL_FAILED) return;
@@ -1083,6 +1084,11 @@ async function processMatches() {
   }
   if (!clearedChoc) spreadChocolate();
   state.cascade = 0;
+  } catch(e) {
+    console.error('processMatches error:', e);
+    state.cascade = 0;
+    state.tweens = [];
+  }
 }
 
 async function endOfLevelBonus() {
@@ -1110,6 +1116,7 @@ async function trySwap(r, c) {
   const sr = state.selected.r, sc = state.selected.c;
   state.selected = null; state.hintTimer = 0; state.hintMove = null;
   ensureAudio();
+  try {
 
   // Animate swap
   const c1 = state.board[sr][sc], c2 = state.board[r][c];
@@ -1161,6 +1168,11 @@ async function trySwap(r, c) {
 
   sfxSwap(); state.movesLeft--;
   await processMatches(); state.animating = false; await checkLevelEnd();
+  } catch(e) {
+    console.error('trySwap error:', e);
+    state.animating = false;
+    state.tweens = []; // clear any stuck tweens
+  }
 }
 
 function hasValidMoves() {
@@ -1353,13 +1365,19 @@ function handleBoardClick(px, py) {
       state.animating = true; // Set before async to prevent race
       // Gravity after hammer
       (async () => {
-        await sleep(100);
-        const { newTiles, fallingCells } = gravity();
-        await animateGravity(fallingCells);
-        await animateNewTiles(newTiles);
-        await processMatches();
-        state.animating = false;
-        await checkLevelEnd();
+        try {
+          await sleep(100);
+          const { newTiles, fallingCells } = gravity();
+          await animateGravity(fallingCells);
+          await animateNewTiles(newTiles);
+          await processMatches();
+          state.animating = false;
+          await checkLevelEnd();
+        } catch(e) {
+          console.error('hammer async error:', e);
+          state.animating = false;
+          state.tweens = [];
+        }
       })();
     }
     return;
@@ -2135,6 +2153,25 @@ onAuthStateChanged(auth, async (user) => {
     state.screen = SCREEN.LEVEL_SELECT;
   }
 });
+
+// ── Animating watchdog ────────────────────────────────────────────────────
+// If state.animating gets stuck true for >3s while on PLAYING screen,
+// force-reset it so the game doesn't stay frozen.
+let _animWatchdogStart = 0;
+setInterval(() => {
+  if (state.screen === SCREEN.PLAYING && state.animating) {
+    const now = Date.now();
+    if (!_animWatchdogStart) { _animWatchdogStart = now; return; }
+    if (now - _animWatchdogStart > 3000) {
+      console.warn('Watchdog: force-resetting stuck state.animating');
+      state.animating = false;
+      state.tweens = [];
+      _animWatchdogStart = 0;
+    }
+  } else {
+    _animWatchdogStart = 0;
+  }
+}, 500);
 
 </script>
 </body>
