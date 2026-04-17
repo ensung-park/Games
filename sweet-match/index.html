@@ -536,6 +536,27 @@ function easeIn(t) { return t * t; }
 function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) / 2; }
 function easeBounce(t) { if (t < 0.5) return 4 * t * t; const b = (t - 0.8) * 5; return 1 - b * b * 0.15; }
 
+let _tweenGeneration = 0; // incremented on clearTweens to cancel orphan .then() chains
+
+function clearTweens() {
+  _tweenGeneration++;
+  for (const tw of state.tweens) {
+    for (const k in tw.end) tw.obj[k] = tw.end[k];
+    if (tw.end.removeScale !== undefined && tw.end.removeScale === 0) tw.obj.alpha = 0;
+    if (tw.onDone) try { tw.onDone(); } catch(e) {}
+  }
+  state.tweens = [];
+}
+
+function safeTween(obj, props, duration, easing) {
+  const gen = _tweenGeneration;
+  return tween(obj, props, duration, easing).then(result => {
+    // If clearTweens was called after this tween started, abort chain
+    if (_tweenGeneration !== gen) return Promise.reject('tween_cancelled');
+    return result;
+  });
+}
+
 function updateTweens(dt) {
   for (let i = state.tweens.length - 1; i >= 0; i--) {
     const tw = state.tweens[i];
@@ -965,9 +986,12 @@ async function animateGravity(fallingCells) {
       promises.push(tween(cell, { drawY: targetY }, dur, 'bounce'));
     }
   }
-  if (promises.length) await Promise.all(promises);
-  // Clean up drawY
-  for (const { cell } of fallingCells) delete cell.drawY;
+  try {
+    if (promises.length) await Promise.all(promises);
+  } finally {
+    // Always clean up drawY, even if interrupted
+    for (const { cell } of fallingCells) delete cell.drawY;
+  }
 }
 
 function spreadChocolate() {
@@ -999,7 +1023,12 @@ async function animateNewTiles(tiles) {
     const cell = state.board[r][c];
     if (cell && cell.scale === 0) { cell.scale = 0; promises.push(tween(cell, { scale: 1 }, 0.2, 'bounce')); }
   }
-  await Promise.all(promises);
+  try {
+    await Promise.all(promises);
+  } finally {
+    // Ensure all new tiles are fully visible even if interrupted
+    for (const { r, c } of tiles) { const cell = state.board[r][c]; if (cell && cell.scale !== undefined && cell.scale < 1) cell.scale = 1; }
+  }
 }
 
 async function processMatches() {
@@ -1052,7 +1081,7 @@ async function processMatches() {
         cell.removeScale = 1; cell.alpha = 1;
         squishTweens.push(
           Promise.race([
-            tween(cell, { removeScale: 1.25 }, 0.08, 'easeOut').then(() => tween(cell, { removeScale: 0, alpha: 0 }, 0.12, 'easeIn')),
+            safeTween(cell, { removeScale: 1.25 }, 0.08, 'easeOut').then(() => safeTween(cell, { removeScale: 0, alpha: 0 }, 0.12, 'easeIn')).catch(()=>{}),
             new Promise(r => setTimeout(r, 300))
           ])
         );
@@ -1099,7 +1128,7 @@ async function processMatches() {
   } catch(e) {
     console.error('processMatches error:', e);
     state.cascade = 0;
-    state.tweens = [];
+    clearTweens();
   }
 }
 
@@ -1183,7 +1212,7 @@ async function trySwap(r, c) {
   } catch(e) {
     console.error('trySwap error:', e);
     state.animating = false;
-    state.tweens = []; // clear any stuck tweens
+    clearTweens(); // clear any stuck tweens
   }
 }
 
@@ -1388,7 +1417,7 @@ function handleBoardClick(px, py) {
         } catch(e) {
           console.error('hammer async error:', e);
           state.animating = false;
-          state.tweens = [];
+          clearTweens();
         }
       })();
     }
@@ -1523,13 +1552,13 @@ function onPointerDown(e) {
     if (!_lastTapTime) _lastTapTime = now;
     if (now - _lastTapTime > 1500) {
       console.warn('Force-unlock: animating stuck, resetting on tap');
-      state.animating = false; state.tweens = []; state.selected = null; state.bonusPhase = false;
+      state.animating = false; clearTweens(); state.selected = null; state.bonusPhase = false;
       _lastTapTime = 0;
     }
   } else { _lastTapTime = 0; }
   if (isSoundToggle(px, py)) { ensureAudio(); soundEnabled = !soundEnabled; try { localStorage.setItem('sweetMatchSound', soundEnabled); } catch(e) {} if (!soundEnabled) stopBgMusic(); else if (state.screen === SCREEN.PLAYING) startBgMusic(); sfxClick(); return; }
   if (state._cbBtnGame) { const cb = state._cbBtnGame; if (px >= cb.x && px <= cb.x + cb.w && py >= cb.y && py <= cb.y + cb.h) { state.colorBlindMode = !state.colorBlindMode; try { localStorage.setItem('sweetMatchColorBlind', state.colorBlindMode); } catch(e) {} sfxClick(); return; } }
-  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = []; state.dailyChallenge = false; stopBgMusic(); return; }
+  if (isBackButton(px, py)) { ensureAudio(); sfxClick(); state.screen = SCREEN.LEVEL_SELECT; state.animating = false; clearTweens(); state.particles = []; state.floatingTexts = []; state.dailyChallenge = false; stopBgMusic(); return; }
   if (state.screen === SCREEN.GOAL_PREVIEW) { state.screen = SCREEN.PLAYING; return; }
   if (state.screen === SCREEN.TITLE) { handleTitleClick(px, py); return; }
   if (state.screen === SCREEN.LEVEL_SELECT) { handleLevelSelectClick(px, py); return; }
@@ -2176,7 +2205,7 @@ window.addEventListener('popstate', () => {
   if (state.screen === SCREEN.PLAYING || state.screen === SCREEN.GOAL_PREVIEW) {
     sfxClick();
     state.screen = SCREEN.LEVEL_SELECT;
-    state.animating = false; state.tweens = []; state.particles = []; state.floatingTexts = [];
+    state.animating = false; clearTweens(); state.particles = []; state.floatingTexts = [];
     state.dailyChallenge = false; stopBgMusic();
   } else if (state.screen === SCREEN.LEADERBOARD || state.screen === SCREEN.LEVEL_FAILED || state.screen === SCREEN.LEVEL_COMPLETE) {
     sfxClick();
@@ -2234,10 +2263,18 @@ setInterval(() => {
       const msg = `stuck ${now - _animWatchdogStart}ms tweens=${state.tweens.length} cascade=${state.cascade} bonus=${state.bonusPhase}`;
       console.warn('Watchdog:', msg);
       _freezeLog.push(msg);
+      // Force-complete all pending tweens (snap to end values + fire onDone)
+      // This prevents drawY/removeScale being left in mid-animation state
+      for (const tw of state.tweens) {
+        for (const k in tw.end) tw.obj[k] = tw.end[k];
+        if (tw.end.removeScale !== undefined && tw.end.removeScale === 0) tw.obj.alpha = 0;
+        if (tw.onDone) try { tw.onDone(); } catch(e) {}
+      }
+      state.tweens = [];
       state.animating = false;
       state.bonusPhase = false;
-      state.tweens = [];
       state.selected = null;
+      state.cascade = 0;
       _animWatchdogStart = 0;
     }
   } else {
